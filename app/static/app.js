@@ -1,9 +1,11 @@
 /* StormPilot PM — dependency-free UI for the Scrum and Kanban modules. */
 'use strict';
 
-const state = { sprints: [], stories: [], tasks: [], board: null, openSprint: null, dispatchActivity: [], probeSamples: [], overviewRefreshing: false, recordEditor: null, recordEditorTrigger: null, confirmationResolver: null, confirmationTrigger: null };
+const state = { sprints: [], stories: [], tasks: [], board: null, openSprint: null, dispatchActivity: [], probeSamples: [], overviewRefreshing: false, recordEditor: null, recordEditorTrigger: null, confirmationResolver: null, confirmationTrigger: null, filters: { search: '', status: '', priority: '', taskType: '', assignee: '', samples: false } };
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const TASK_STATUSES = ['backlog', 'todo', 'in_progress', 'code_review', 'testing', 'done', 'blocked'];
+const TASK_STATUS_LABELS = { backlog: 'Backlog', todo: 'To Do', in_progress: 'In Progress', code_review: 'Code Review', testing: 'Testing', done: 'Done', blocked: 'Blocked' };
 
 function esc(value) {
   return String(value == null ? '' : value)
@@ -342,8 +344,8 @@ function renderSprints() {
     list.innerHTML = state.sprints.map(sp => {
       const st = sp.stats;
       const open = state.openSprint === sp.id;
-      const counts = ['todo', 'in_progress', 'testing', 'done']
-        .map(k => `${k.replace('_', ' ')} ${st.by_status[k]}`).join(' · ');
+      const counts = TASK_STATUSES
+        .map(key => `${TASK_STATUS_LABELS[key]} ${st.by_status[key] || 0}`).join(' · ');
       return `<article class="sprint-card" data-id="${sp.id}">
         <h3>${esc(sp.name)} ${statusBadge(sp.status)}</h3>
         ${sp.goal ? `<div class="card-desc">${esc(sp.goal)}</div>` : ''}
@@ -401,6 +403,12 @@ async function loadBoard() {
 
 function renderBoard() {
   if (!state.board) return;
+  const summary = state.board.summary;
+  $('#kanban-total').textContent = summary.total;
+  $('#kanban-wip').textContent = summary.by_status.in_progress;
+  $('#kanban-blocked').textContent = summary.blocked;
+  $('#kanban-done').textContent = summary.completed;
+  fillBoardFilters();
   const board = $('#board');
   board.innerHTML = state.board.columns.map(col => {
     const limit = col.limit;
@@ -408,12 +416,14 @@ function renderBoard() {
       : (limit != null && col.count >= limit ? 'near' : '');
     const badge = limit == null ? `${col.count}`
       : `${col.count}/${limit}`;
-    const cards = col.tasks.length
-      ? col.tasks.map(t => taskCardHtml(t)).join('')
+    const tasks = col.tasks.filter(task => taskMatchesFilters(task));
+    const cards = tasks.length
+      ? tasks.map(t => taskCardHtml(t)).join('')
       : '<p class="empty">Drop tasks here</p>';
     return `<section class="column" data-col="${esc(col.key)}">
       <header class="column-head">
         <h3>${esc(col.label)}</h3>
+        <span class="column-count">${tasks.length}</span>
         <span class="wip-badge ${badgeClass}" title="WIP: ${limit == null ? 'unlimited' : limit}">${badge}</span>
       </header>
       <div class="column-body">${cards}</div>
@@ -422,14 +432,42 @@ function renderBoard() {
   bindDragDrop();
 }
 
+function fillBoardFilters() {
+  const statusSelect = $('#filter-status');
+  if (statusSelect.options.length === 1) {
+    for (const status of TASK_STATUSES) statusSelect.add(new Option(TASK_STATUS_LABELS[status], status));
+  }
+  const assigneeSelect = $('#filter-assignee');
+  const previous = assigneeSelect.value;
+  const assignees = [...new Set(state.tasks.map(task => task.assignee.trim()).filter(Boolean))].sort();
+  assigneeSelect.innerHTML = '<option value="">Anyone</option>' +
+    assignees.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+  if (assignees.includes(previous)) assigneeSelect.value = previous;
+  state.filters.assignee = assigneeSelect.value;
+}
+
+function taskMatchesFilters(task) {
+  const search = state.filters.search.trim().toLocaleLowerCase();
+  const searchable = `SP-${String(task.id).padStart(3, '0')} ${task.id} ${task.title} ${task.description}`.toLocaleLowerCase();
+  return (!search || searchable.includes(search)) &&
+    (!state.filters.status || task.status === state.filters.status) &&
+    (!state.filters.priority || task.priority === state.filters.priority) &&
+    (!state.filters.taskType || task.task_type === state.filters.taskType) &&
+    (!state.filters.assignee || task.assignee === state.filters.assignee) &&
+    (!state.filters.samples || task.is_sample);
+}
+
 function taskCardHtml(t) {
   const sprint = state.sprints.find(s => s.id === t.sprint_id);
   const overdue = t.due_date && t.status !== 'done' && t.due_date < new Date().toISOString().slice(0, 10);
   return `<article class="task-card p-${esc(t.priority)}${overdue ? ' overdue' : ''}"
       draggable="true" data-id="${t.id}" tabindex="0" role="button"
       title="${esc(t.description || t.title)}">
+    <div class="task-card-heading"><span class="task-id">SP-${String(t.id).padStart(3, '0')}</span>${t.is_sample ? '<span class="sample-badge">SAMPLE</span>' : ''}</div>
     <strong>${esc(t.title)}</strong>
+    ${t.blocker_reason ? `<div class="blocker-reason"><strong>Blocked:</strong> ${esc(t.blocker_reason)}</div>` : ''}
     <div class="meta">
+      <span class="type-badge">${esc(t.task_type.replace('_', ' '))}</span>
       ${priorityBadge(t.priority)}
       ${t.assignee ? `<span>@${esc(t.assignee)}</span>` : ''}
       ${t.due_date ? `<span class="due">due ${esc(t.due_date)}</span>` : ''}
@@ -468,6 +506,20 @@ function bindDragDrop() {
       const target = col.dataset.col;
       const task = state.tasks.find(t => t.id === id);
       if (!task || task.status === target) { renderBoard(); return; }
+      if (target === 'blocked' && !task.blocker_reason) {
+        openTaskModal(id);
+        $('#task-form').elements.status.value = 'blocked';
+        updateTaskConditionalFields();
+        toast('Add a blocker reason to move this task to Blocked');
+        return;
+      }
+      if (target === 'done' && (!task.acceptance_criteria || !task.completion_evidence)) {
+        openTaskModal(id);
+        $('#task-form').elements.status.value = 'done';
+        updateTaskConditionalFields();
+        toast('Verify acceptance criteria and record completion evidence');
+        return;
+      }
       try {
         await api('POST', `/api/tasks/${id}/move`, { status: target });
         toast(`Moved to ${target.replace('_', ' ')}`);
@@ -516,8 +568,15 @@ function openTaskModal(id) {
   if (task) {
     $('#task-modal-title').textContent = 'Edit task';
     form.elements.id.value = task.id;
+    const completionDate = task.completed_at ? new Date(task.completed_at).toLocaleDateString() : 'Not completed';
+    $('#task-record-meta').textContent = `SP-${String(task.id).padStart(3, '0')} · Created ${new Date(task.created_at).toLocaleDateString()} · ${completionDate}`;
+    $('#task-record-meta').hidden = false;
     form.elements.title.value = task.title;
     form.elements.description.value = task.description || '';
+    form.elements.acceptance_criteria.value = task.acceptance_criteria || '';
+    form.elements.completion_evidence.value = task.completion_evidence || '';
+    form.elements.task_type.value = task.task_type || 'feature';
+    form.elements.blocker_reason.value = task.blocker_reason || '';
     form.elements.priority.value = task.priority;
     form.elements.status.value = task.status;
     form.elements.assignee.value = task.assignee || '';
@@ -525,15 +584,29 @@ function openTaskModal(id) {
     form.elements.sprint_id.value = task.sprint_id == null ? '' : task.sprint_id;
     form.elements.story_id.value = task.story_id == null ? '' : task.story_id;
     $('#task-delete').hidden = false;
+    $('#sample-task-note').hidden = !task.is_sample;
   } else {
     $('#task-modal-title').textContent = 'New task';
     $('#task-delete').hidden = true;
+    $('#sample-task-note').hidden = true;
+    $('#task-record-meta').hidden = true;
   }
+  updateTaskConditionalFields();
   $('#task-modal').hidden = false;
   form.elements.title.focus();
 }
 
 function closeTaskModal() { $('#task-modal').hidden = true; }
+
+function updateTaskConditionalFields() {
+  const form = $('#task-form');
+  const status = form.elements.status.value;
+  $('#blocker-field').hidden = status !== 'blocked';
+  $('#completion-field').hidden = status !== 'done';
+  form.elements.blocker_reason.required = status === 'blocked';
+  form.elements.acceptance_criteria.required = status === 'done';
+  form.elements.completion_evidence.required = status === 'done';
+}
 
 async function submitTaskForm(ev) {
   ev.preventDefault();
@@ -542,6 +615,10 @@ async function submitTaskForm(ev) {
   const body = {
     title: form.elements.title.value,
     description: form.elements.description.value,
+    acceptance_criteria: form.elements.acceptance_criteria.value,
+    completion_evidence: form.elements.completion_evidence.value,
+    task_type: form.elements.task_type.value,
+    blocker_reason: form.elements.blocker_reason.value,
     priority: form.elements.priority.value,
     status: form.elements.status.value,
     assignee: form.elements.assignee.value,
@@ -805,6 +882,7 @@ async function init() {
   $('#overview-refresh').addEventListener('click', refreshOverview);
   $('#dispatch-run').addEventListener('click', runTestDispatch);
   $('#task-form').addEventListener('submit', submitTaskForm);
+  $('#task-form').elements.status.addEventListener('change', updateTaskConditionalFields);
   $('#task-cancel').addEventListener('click', closeTaskModal);
   $('#task-delete').addEventListener('click', deleteCurrentTask);
   $('#task-modal').addEventListener('click', ev => {
@@ -827,6 +905,43 @@ async function init() {
     if (!form.hidden) fillWipForm();
   });
   $('#wip-form').addEventListener('submit', submitWipForm);
+  const applyFilters = () => {
+    state.filters.search = $('#kanban-search').value;
+    state.filters.status = $('#filter-status').value;
+    state.filters.priority = $('#filter-priority').value;
+    state.filters.taskType = $('#filter-type').value;
+    state.filters.assignee = $('#filter-assignee').value;
+    state.filters.samples = $('#filter-samples').checked;
+    renderBoard();
+  };
+  ['input', 'change'].forEach(eventName => {
+    $('#kanban-search').addEventListener(eventName, applyFilters);
+    ['#filter-status', '#filter-priority', '#filter-type', '#filter-assignee', '#filter-samples']
+      .forEach(selector => $(selector).addEventListener(eventName, applyFilters));
+  });
+  $('#clear-filters').addEventListener('click', () => {
+    $('#kanban-search').value = '';
+    $('#filter-status').value = '';
+    $('#filter-priority').value = '';
+    $('#filter-type').value = '';
+    $('#filter-assignee').value = '';
+    $('#filter-samples').checked = false;
+    applyFilters();
+  });
+  $('#seed-samples').addEventListener('click', async () => {
+    const button = $('#seed-samples');
+    button.disabled = true;
+    try {
+      const result = await api('POST', '/api/tasks/samples');
+      toast(result.created ? `${result.created} sample tasks added to Backlog` : 'Sample tasks are already loaded');
+      await reload();
+      await loadBoard();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
   try {
     await Promise.all([reload(), refreshOverview()]);
     await loadBoard();

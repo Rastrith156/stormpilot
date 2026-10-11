@@ -25,6 +25,7 @@ Users → API ← Prometheus ← Grafana
 - CPU HPA manifest (requires metrics-server), PodDisruptionBudget, restricted pod security.
 - A namespace- and context-restricted pod-deletion experiment.
 - Provisioned Grafana dashboard and Prometheus alert rules in Compose.
+- Separate SQLite-backed Scrum/Kanban task API with seven workflow stages, search/filters, WIP limits and opt-in sample tasks.
 - Bounded local load generator, demo guide, rollback and incident runbook.
 
 ## Prerequisites
@@ -86,6 +87,13 @@ kubectl --context kind-stormpilot -n stormpilot-lab set image deployment/stormpi
 kubectl --context kind-stormpilot -n stormpilot-lab rollout status deployment/stormpilot --timeout=120s
 ```
 Replace placeholders before running. The image must be publicly pullable, or configure a namespace-scoped registry pull secret securely. Never commit a token. For a local offline release, build a new unique local tag and load it into kind first. See docs/RUNBOOK.md for rollback.
+
+## 6. Project task board
+Open `http://localhost:8080/ui` and select **Kanban board**. This is a project-management subsystem, separate from the simulated `GET /dispatch` route. It is intended for a trusted local lab only: task endpoints do not authenticate callers, so do not expose the app publicly or to an untrusted network.
+
+Tasks move through Backlog → To Do → In Progress → Code Review → Testing → Done. Blocked is an exception state with a required reason. The API enforces transitions; a task cannot enter Done without acceptance criteria and completion evidence. “Load sample tasks” is explicit and idempotent; examples are marked SAMPLE and start in Backlog. API details and the transition table are in [docs/KANBAN.md](docs/KANBAN.md).
+
+Compose stores the SQLite task database in the `stormpilot-data` named volume. The Kubernetes lab currently uses a separate ephemeral `emptyDir` for each replica. As a result, task updates are not shared between replicas and are lost when a pod is replaced. Use the local/Compose board for persistence demonstrations; do not treat the Kubernetes board as shared team storage. A shared database and authentication are prerequisites for team use.
 
 ## Project status and limitations
 The archive provides implementation and instructions, not a deployed cloud service. See VALIDATION.md for checks actually executed. Kubernetes recovery, autoscaling, image scans and GitHub publishing need your environment for end-to-end verification. This is an educational HTTP server, not production-ready drone software. It has no authentication, TLS ingress, durable dispatch storage, multizone failover or automatic rollback. Do not expose it publicly.

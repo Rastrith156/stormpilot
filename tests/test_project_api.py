@@ -1,10 +1,12 @@
 """Integration tests for the Scrum/Kanban project-management API and UI."""
 import json
 import os
+import sqlite3
 import shutil
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -30,6 +32,15 @@ class ProjectApiTests(unittest.TestCase):
         cls.thread.join()
         os.environ.pop('STORMPILOT_DB', None)
         shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def setUp(self):
+        with db.open_db() as conn:
+            conn.execute('DELETE FROM tasks')
+            conn.execute('DELETE FROM user_stories')
+            conn.execute('DELETE FROM sprints')
+            for column, limit in db.DEFAULT_WIP_LIMITS.items():
+                conn.execute('UPDATE wip_limits SET limit_value = ? WHERE column_name = ?',
+                             (limit, column))
 
     # ------------------------------- helpers ----------------------------
 
@@ -71,6 +82,20 @@ class ProjectApiTests(unittest.TestCase):
         status, data = self.post('/api/tasks', body)
         self.assertEqual(status, 201, data)
         return data
+
+    def move_task_through(self, task_id, statuses):
+        for status in statuses:
+            current_status, moved = self.request(
+                'POST', f'/api/tasks/{task_id}/move', {'status': status})
+            self.assertEqual(current_status, 200, moved)
+        return moved
+
+    def mark_task_ready_for_done(self, task_id):
+        status, updated = self.put(f'/api/tasks/{task_id}', {
+            'acceptance_criteria': 'Required verification is complete.',
+            'completion_evidence': 'Automated checks passed in the integration suite.',
+        })
+        self.assertEqual(status, 200, updated)
 
     # ------------------------------- identity ---------------------------
 
@@ -222,7 +247,8 @@ class ProjectApiTests(unittest.TestCase):
         t1 = self.make_task('P1', sprint_id=sprint['id'])
         t2 = self.make_task('P2', sprint_id=sprint['id'])
         t3 = self.make_task('P3', sprint_id=sprint['id'])
-        self.request('POST', f"/api/tasks/{t1['id']}/move", {'status': 'done'})
+        self.mark_task_ready_for_done(t1['id'])
+        self.move_task_through(t1['id'], ['in_progress', 'code_review', 'testing', 'done'])
         self.request('POST', f"/api/tasks/{t2['id']}/move", {'status': 'in_progress'})
         status, detail = self.get(f"/api/sprints/{sprint['id']}")
         self.assertEqual(status, 200)
@@ -272,18 +298,21 @@ class ProjectApiTests(unittest.TestCase):
         status, board = self.get('/api/board')
         self.assertEqual(status, 200)
         keys = [c['key'] for c in board['columns']]
-        self.assertEqual(keys, ['todo', 'in_progress', 'testing', 'done'])
+        self.assertEqual(keys, ['backlog', 'todo', 'in_progress', 'code_review',
+                                'testing', 'done', 'blocked'])
         for col in board['columns']:
             self.assertIn('limit', col)
             self.assertIn('count', col)
             self.assertIn('tasks', col)
             self.assertTrue(all(t['status'] == col['key'] for t in col['tasks']))
         self.assertIn('todo', board['wip_limits'])
+        self.assertEqual(board['summary']['total'], sum(c['count'] for c in board['columns']))
 
     def test_move_task_between_columns(self):
         task = self.make_task('Mover', status='todo')
-        status, moved = self.request('POST', f"/api/tasks/{task['id']}/move",
-                                     {'status': 'testing'})
+        moved = self.move_task_through(
+            task['id'], ['in_progress', 'code_review', 'testing'])
+        status = 200
         self.assertEqual(status, 200, moved)
         self.assertEqual(moved['status'], 'testing')
         status, err = self.request('POST', f"/api/tasks/{task['id']}/move",
@@ -293,6 +322,64 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         status, err = self.request('POST', '/api/tasks/999999/move', {'status': 'done'})
         self.assertEqual(status, 404)
+
+    def test_blocked_tasks_require_reason_and_can_resume(self):
+        status, error = self.post('/api/tasks', {'title': 'Missing blocker reason',
+                                                  'status': 'blocked'})
+        self.assertEqual(status, 400)
+        self.assertIn('blocker_reason', error['error'])
+        task = self.make_task('Blocked with reason', status='in_progress',
+                              blocker_reason='Waiting on API credentials')
+        status, blocked = self.request('POST', f"/api/tasks/{task['id']}/move",
+                                       {'status': 'blocked'})
+        self.assertEqual(status, 200, blocked)
+        self.assertEqual(blocked['blocker_reason'], 'Waiting on API credentials')
+        status, resumed = self.request('POST', f"/api/tasks/{task['id']}/move",
+                                       {'status': 'todo'})
+        self.assertEqual(status, 200, resumed)
+        self.assertEqual(resumed['blocker_reason'], '')
+
+    def test_task_metadata_filters_and_sample_seeding(self):
+        first = self.make_task('Sample architecture review', status='backlog', task_type='documentation',
+                               priority='high', acceptance_criteria='Record verified routes.',
+                               is_sample=True)
+        self.assertEqual(first['task_type'], 'documentation')
+        self.assertEqual(first['acceptance_criteria'], 'Record verified routes.')
+        status, filtered = self.get('/api/tasks?search=architecture&priority=high&task_type=documentation')
+        self.assertEqual(status, 200)
+        self.assertEqual([task['id'] for task in filtered], [first['id']])
+        status, by_id = self.get(f"/api/tasks?search=SP-{first['id']:03d}")
+        self.assertEqual(status, 200)
+        self.assertEqual([task['id'] for task in by_id], [first['id']])
+        status, invalid = self.get('/api/tasks?task_type=made_up')
+        self.assertEqual(status, 400)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(
+                lambda _: self.request('POST', '/api/tasks/samples'), range(2)))
+        self.assertTrue(all(status == 200 for status, _ in results), results)
+        self.assertEqual(sum(result['created'] for _, result in results), 25)
+        status, reseeded = self.request('POST', '/api/tasks/samples')
+        self.assertEqual(status, 200)
+        self.assertEqual(reseeded['created'], 0)
+        status, samples = self.get('/api/tasks?is_sample=true')
+        self.assertEqual(status, 200)
+        self.assertTrue(all(task['is_sample'] for task in samples))
+        self.assertTrue(all(task['status'] == 'backlog' for task in samples))
+
+    def test_task_move_rejects_skipping_review_stages(self):
+        task = self.make_task('Transition guard')
+        status, err = self.request('POST', f"/api/tasks/{task['id']}/move",
+                                   {'status': 'testing'})
+        self.assertEqual(status, 400)
+        self.assertIn('transition', err['error'])
+
+    def test_task_cannot_be_completed_without_evidence(self):
+        task = self.make_task('Completion gate', acceptance_criteria='Health checks pass.')
+        self.move_task_through(task['id'], ['in_progress', 'code_review', 'testing'])
+        status, error = self.request('POST', f"/api/tasks/{task['id']}/move",
+                                     {'status': 'done'})
+        self.assertEqual(status, 400)
+        self.assertIn('completion_evidence', error['error'])
 
     def test_wip_limits_crud_and_enforcement(self):
         status, limits = self.get('/api/wip-limits')
@@ -321,14 +408,16 @@ class ProjectApiTests(unittest.TestCase):
         status, err = self.post('/api/tasks', {'title': 'WIP C', 'status': 'in_progress'})
         self.assertEqual(status, 409)
         # Moving the task out frees the slot again.
-        status, moved = self.request('POST', f"/api/tasks/{a['id']}/move",
-                                     {'status': 'done'})
-        self.assertEqual(status, 200)
+        self.mark_task_ready_for_done(a['id'])
+        for target in ('code_review', 'testing', 'done'):
+            status, moved = self.request('POST', f"/api/tasks/{a['id']}/move",
+                                         {'status': target})
+            self.assertEqual(status, 200, moved)
         status, moved = self.request('POST', f"/api/tasks/{b['id']}/move",
                                      {'status': 'in_progress'})
         self.assertEqual(status, 200, moved)
         # Restore the seeded default so other tests are unaffected.
-        self.put('/api/wip-limits', {'in_progress': 3})
+        self.put('/api/wip-limits', db.DEFAULT_WIP_LIMITS)
 
     def test_wip_limit_validation(self):
         status, err = self.put('/api/wip-limits', {'bogus': 2})
@@ -373,6 +462,37 @@ class ProjectApiTests(unittest.TestCase):
         status, fetched = self.get(f"/api/tasks/{task['id']}")
         self.assertEqual(status, 200)
         self.assertEqual(fetched['assignee'], 'grace')
+
+    def test_legacy_task_database_migrates_without_losing_rows(self):
+        legacy_path = os.path.join(self._tmp, 'legacy.db')
+        conn = sqlite3.connect(legacy_path)
+        conn.execute(
+            'CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL,'
+            " description TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT 'medium',"
+            " assignee TEXT NOT NULL DEFAULT '', due_date TEXT, status TEXT NOT NULL DEFAULT 'todo',"
+            ' sprint_id INTEGER, story_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)')
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, created_at, updated_at)"
+            " VALUES (41, 'Existing task', 'todo', '2026-01-01T00:00:00+00:00',"
+            " '2026-01-01T00:00:00+00:00')")
+        conn.commit()
+        conn.close()
+
+        previous_path = os.environ['STORMPILOT_DB']
+        os.environ['STORMPILOT_DB'] = legacy_path
+        db._SCHEMA_READY.discard(legacy_path)
+        try:
+            tasks = db.list_tasks()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]['id'], 41)
+            self.assertEqual(tasks[0]['task_type'], 'feature')
+            self.assertEqual(tasks[0]['acceptance_criteria'], '')
+            self.assertEqual(tasks[0]['is_sample'], 0)
+            self.assertEqual(tuple(db.KANBAN_COLUMNS), (
+                'backlog', 'todo', 'in_progress', 'code_review', 'testing', 'done', 'blocked'))
+        finally:
+            os.environ['STORMPILOT_DB'] = previous_path
+            db._SCHEMA_READY.discard(legacy_path)
 
 
 if __name__ == '__main__':

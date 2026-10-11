@@ -25,6 +25,7 @@ ROUTE_PATTERNS = [
     ('DELETE', re.compile(r'^/api/backlog/(\d+)$'), 'delete_story'),
     ('GET', re.compile(r'^/api/tasks$'), 'list_tasks'),
     ('POST', re.compile(r'^/api/tasks$'), 'create_task'),
+    ('POST', re.compile(r'^/api/tasks/samples$'), 'seed_sample_tasks'),
     ('GET', re.compile(r'^/api/tasks/(\d+)$'), 'get_task'),
     ('PUT', re.compile(r'^/api/tasks/(\d+)$'), 'update_task'),
     ('DELETE', re.compile(r'^/api/tasks/(\d+)$'), 'delete_task'),
@@ -100,6 +101,8 @@ def _route(name, groups, body, query):
         return 200, db.list_tasks(_task_filters(query))
     if name == 'create_task':
         return 201, db.create_task(body or {})
+    if name == 'seed_sample_tasks':
+        return 200, db.seed_sample_tasks()
     if name == 'get_task':
         return 200, db.get_task(int(groups[0]))
     if name == 'update_task':
@@ -133,12 +136,25 @@ def _board_payload():
             'over_limit': limit is not None and len(tasks) > limit,
             'tasks': tasks,
         })
-    return {'columns': columns, 'wip_limits': limits}
+    tasks = db.list_tasks()
+    by_priority = {priority: sum(task['priority'] == priority for task in tasks)
+                   for priority in db.PRIORITIES}
+    return {
+        'columns': columns,
+        'wip_limits': limits,
+        'summary': {
+            'total': len(tasks),
+            'by_status': {column['key']: column['count'] for column in columns},
+            'by_priority': by_priority,
+            'blocked': sum(task['status'] == 'blocked' for task in tasks),
+            'completed': sum(task['status'] == 'done' for task in tasks),
+        },
+    }
 
 
 def _task_filters(query):
     filters = {}
-    for key in ('sprint_id', 'story_id', 'status'):
+    for key in ('sprint_id', 'story_id', 'status', 'priority', 'task_type', 'assignee', 'search', 'is_sample'):
         if key not in query:
             continue
         raw = query[key][0]
@@ -147,6 +163,26 @@ def _task_filters(query):
                 raise db.ApiError(
                     400, f'status must be one of: {", ".join(db.KANBAN_COLUMNS)}')
             filters[key] = raw
+        elif key == 'priority':
+            if raw not in db.PRIORITIES:
+                raise db.ApiError(400, f'priority must be one of: {", ".join(db.PRIORITIES)}')
+            filters[key] = raw
+        elif key == 'task_type':
+            if raw not in db.TASK_TYPES:
+                raise db.ApiError(400, f'task_type must be one of: {", ".join(db.TASK_TYPES)}')
+            filters[key] = raw
+        elif key == 'assignee':
+            filters[key] = raw.strip()
+        elif key == 'search':
+            sample_id = re.fullmatch(r'sp-0*(\d+)', raw.strip(), re.IGNORECASE)
+            if sample_id:
+                filters['task_id'] = int(sample_id.group(1))
+            else:
+                filters[key] = raw.strip()
+        elif key == 'is_sample':
+            if raw not in ('true', 'false'):
+                raise db.ApiError(400, 'is_sample must be true or false')
+            filters[key] = raw == 'true'
         else:
             try:
                 filters[key] = int(raw)

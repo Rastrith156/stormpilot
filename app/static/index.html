@@ -165,15 +165,35 @@
   </section>
 
   <section id="view-kanban" class="view" hidden>
-    <header class="page-header compact-header board-page-header"><div><p class="eyebrow">DELIVERY PLANNING <span class="eyebrow-divider">/</span> FLOW MANAGEMENT</p><h1>Kanban board</h1><p class="page-description">Move work through delivery and keep in-progress limits visible.</p></div><div class="board-toolbar">
+    <header class="page-header compact-header board-page-header"><div><p class="eyebrow">PROJECT DELIVERY <span class="eyebrow-divider">/</span> WORKFLOW MANAGEMENT</p><h1>Kanban board</h1><p class="page-description">Development work moves through review and testing before it can be completed.</p></div><div class="board-toolbar">
       <button id="wip-toggle" class="btn btn-ghost" type="button">WIP limits</button>
+      <button id="seed-samples" class="btn btn-ghost" type="button">Load sample tasks</button>
       <button id="kanban-new-task" class="btn btn-primary" type="button"><span class="button-glyph" aria-hidden="true">＋</span> New task</button>
     </div></header>
+    <section class="kanban-summary" aria-label="Board summary">
+      <div><strong id="kanban-total">0</strong><span>Total tasks</span></div>
+      <div><strong id="kanban-wip">0</strong><span>In progress</span></div>
+      <div><strong id="kanban-blocked">0</strong><span>Blocked</span></div>
+      <div><strong id="kanban-done">0</strong><span>Completed</span></div>
+      <p>Done means acceptance criteria have been verified.</p>
+    </section>
+    <div class="kanban-filters" role="search" aria-label="Filter Kanban tasks">
+      <label class="search-field"><span class="filter-label">Search</span><input id="kanban-search" type="search" placeholder="Task title or ID…" aria-label="Search task title or ID"></label>
+      <label><span class="filter-label">Status</span><select id="filter-status" aria-label="Filter by status"><option value="">All stages</option></select></label>
+      <label><span class="filter-label">Priority</span><select id="filter-priority" aria-label="Filter by priority"><option value="">All priorities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+      <label><span class="filter-label">Task type</span><select id="filter-type" aria-label="Filter by task type"><option value="">All types</option><option value="feature">Feature</option><option value="bug">Bug</option><option value="security">Security</option><option value="testing">Testing</option><option value="devops">DevOps</option><option value="documentation">Documentation</option><option value="infrastructure">Infrastructure</option></select></label>
+      <label><span class="filter-label">Assignee</span><select id="filter-assignee" aria-label="Filter by assignee"><option value="">Anyone</option></select></label>
+      <label class="sample-filter"><input id="filter-samples" type="checkbox"> Samples only</label>
+      <button id="clear-filters" class="text-action" type="button">Clear filters</button>
+    </div>
     <form id="wip-form" class="wip-form" hidden>
+      <label>Backlog <input name="backlog" type="number" min="0" placeholder="∞"></label>
       <label>To Do <input name="todo" type="number" min="0" placeholder="∞"></label>
       <label>In Progress <input name="in_progress" type="number" min="0" placeholder="∞"></label>
+      <label>Code Review <input name="code_review" type="number" min="0" placeholder="∞"></label>
       <label>Testing <input name="testing" type="number" min="0" placeholder="∞"></label>
       <label>Done <input name="done" type="number" min="0" placeholder="∞"></label>
+      <label>Blocked <input name="blocked" type="number" min="0" placeholder="∞"></label>
       <button class="btn btn-primary" type="submit">Save limits</button>
     </form>
     <div id="board" class="board"></div>
@@ -185,18 +205,27 @@
   <form id="task-form" class="modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
     <div class="modal-heading"><div><p class="section-kicker">DELIVERY WORK</p><h2 id="task-modal-title">New task</h2></div><button type="button" id="task-cancel" class="modal-close" aria-label="Close dialog">×</button></div>
     <input type="hidden" name="id">
+    <p id="task-record-meta" class="task-record-meta" hidden></p>
     <label>Title <input name="title" maxlength="200" required></label>
     <label>Description <textarea name="description" maxlength="5000" rows="3"></textarea></label>
+    <label>Acceptance criteria <textarea name="acceptance_criteria" maxlength="5000" rows="2" placeholder="What must be verified before this task is Done?"></textarea></label>
+    <label id="completion-field" hidden>Completion evidence <textarea name="completion_evidence" maxlength="5000" rows="2" placeholder="Record the test, review, or deployment evidence that meets the criteria."></textarea></label>
     <div class="form-row">
+      <label>Task type
+        <select name="task_type">
+          <option value="feature">Feature</option><option value="bug">Bug</option><option value="security">Security</option><option value="testing">Testing</option><option value="devops">DevOps</option><option value="documentation">Documentation</option><option value="infrastructure">Infrastructure</option>
+        </select>
+      </label>
       <label>Priority
         <select name="priority">
           <option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="critical">Critical</option>
         </select>
       </label>
       <label>Status
-        <select name="status"><option value="todo">To Do</option><option value="in_progress">In Progress</option><option value="testing">Testing</option><option value="done">Done</option></select>
+        <select name="status"><option value="backlog">Backlog</option><option value="todo" selected>To Do</option><option value="in_progress">In Progress</option><option value="code_review">Code Review</option><option value="testing">Testing</option><option value="done">Done</option><option value="blocked">Blocked</option></select>
       </label>
     </div>
+    <label id="blocker-field" hidden>Blocker reason <textarea name="blocker_reason" maxlength="5000" rows="2" placeholder="What is preventing progress?"></textarea></label>
     <div class="form-row">
       <label>Assignee <input name="assignee" maxlength="100" placeholder="Unassigned"></label>
       <label>Due date <input name="due_date" type="date"></label>
@@ -205,6 +234,7 @@
       <label>Sprint <select name="sprint_id" id="task-sprint-select"><option value="">Backlog</option></select></label>
       <label>Story <select name="story_id" id="task-story-select"><option value="">None</option></select></label>
     </div>
+    <p id="sample-task-note" class="sample-task-note" hidden>Sample task · illustrative only. Verify scope and evidence before moving it to Done.</p>
     <div class="modal-actions">
       <button type="button" id="task-delete" class="btn btn-danger">Delete task</button>
       <span class="spacer"></span>
