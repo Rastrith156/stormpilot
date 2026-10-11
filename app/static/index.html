@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StormPilot — Project Management</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">StormPilot<span class="brand-sub">PM</span></a>
+  <nav class="tabs" aria-label="Modules">
+    <button class="tab active" data-view="scrum" type="button">Scrum</button>
+    <button class="tab" data-view="kanban" type="button">Kanban</button>
+  </nav>
+  <a class="api-link" href="/" title="JSON API">API</a>
+</header>
+
+<main>
+  <!-- ============================== SCRUM ============================== -->
+  <section id="view-scrum" class="view">
+    <div class="panel">
+      <h2>Product backlog</h2>
+      <form id="story-form" class="form-grid">
+        <input name="title" placeholder="User story title" maxlength="200" required>
+        <input name="description" placeholder="Description (optional)" maxlength="5000">
+        <select name="priority">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="critical">Critical</option>
+        </select>
+        <input name="points" type="number" min="0" max="1000" value="0" title="Story points">
+        <select name="sprint_id" id="story-sprint-select"><option value="">Backlog</option></select>
+        <button type="submit">Add story</button>
+      </form>
+      <ul id="story-list" class="card-list"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>Sprints</h2>
+      <form id="sprint-form" class="form-grid">
+        <input name="name" placeholder="Sprint name" maxlength="200" required>
+        <input name="goal" placeholder="Sprint goal" maxlength="5000">
+        <input name="start_date" type="date" required title="Start date">
+        <input name="end_date" type="date" required title="End date">
+        <button type="submit">Create sprint</button>
+      </form>
+      <div id="sprint-list" class="sprint-grid"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Tasks &amp; sprint assignment</h2>
+      <button id="scrum-new-task" class="btn" type="button">New task</button>
+      <div class="table-wrap">
+        <table id="task-table">
+          <thead>
+            <tr><th>Task</th><th>Sprint</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Due</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= KANBAN ============================== -->
+  <section id="view-kanban" class="view" hidden>
+    <div class="board-toolbar">
+      <button id="kanban-new-task" class="btn" type="button">New task</button>
+      <button id="wip-toggle" class="btn btn-ghost" type="button">WIP limits</button>
+      <form id="wip-form" class="wip-form" hidden>
+        <label>To Do <input name="todo" type="number" min="0" placeholder="∞"></label>
+        <label>In Progress <input name="in_progress" type="number" min="0" placeholder="∞"></label>
+        <label>Testing <input name="testing" type="number" min="0" placeholder="∞"></label>
+        <label>Done <input name="done" type="number" min="0" placeholder="∞"></label>
+        <button type="submit">Save limits</button>
+      </form>
+    </div>
+    <div id="board" class="board"></div>
+  </section>
+</main>
+
+<!-- ============================ TASK MODAL ============================ -->
+<div id="task-modal" class="modal-backdrop" hidden>
+  <form id="task-form" class="modal">
+    <h3 id="task-modal-title">New task</h3>
+    <input type="hidden" name="id">
+    <label>Title <input name="title" maxlength="200" required></label>
+    <label>Description <textarea name="description" maxlength="5000" rows="3"></textarea></label>
+    <div class="form-row">
+      <label>Priority
+        <select name="priority">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="critical">Critical</option>
+        </select>
+      </label>
+      <label>Status
+        <select name="status">
+          <option value="todo">To Do</option>
+          <option value="in_progress">In Progress</option>
+          <option value="testing">Testing</option>
+          <option value="done">Done</option>
+        </select>
+      </label>
+    </div>
+    <div class="form-row">
+      <label>Assignee <input name="assignee" maxlength="100" placeholder="Unassigned"></label>
+      <label>Due date <input name="due_date" type="date"></label>
+    </div>
+    <div class="form-row">
+      <label>Sprint <select name="sprint_id" id="task-sprint-select"><option value="">Backlog</option></select></label>
+      <label>Story <select name="story_id" id="task-story-select"><option value="">None</option></select></label>
+    </div>
+    <div class="modal-actions">
+      <button type="button" id="task-delete" class="btn btn-danger">Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="task-cancel" class="btn btn-ghost">Cancel</button>
+      <button type="submit" class="btn">Save</button>
+    </div>
+  </form>
+</div>
+
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

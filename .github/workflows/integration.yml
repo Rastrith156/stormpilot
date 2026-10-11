@@ -1,0 +1,79 @@
+name: Deployment integration tests
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GRAFANA_ADMIN_PASSWORD: ci-only-disposable-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: docker compose config --quiet
+      - run: docker compose up --build -d --wait --wait-timeout 120
+      - run: python scripts/smoke.py
+      - name: Validate Prometheus configuration and alert rules
+        run: docker compose exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+      - name: Check monitoring endpoints
+        run: |
+          curl --fail --retry 15 --retry-connrefused --retry-delay 2 http://127.0.0.1:9090/-/ready
+          curl --fail --retry 15 --retry-connrefused --retry-delay 2 http://127.0.0.1:3000/api/health
+      - name: Confirm successful Prometheus scrape
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request, urllib.parse
+          query = urllib.parse.urlencode({'query': 'up{job="stormpilot"}'})
+          for _ in range(30):
+              with urllib.request.urlopen('http://127.0.0.1:9090/api/v1/query?' + query, timeout=3) as r:
+                  result = json.load(r)['data']['result']
+              if result and result[0]['value'][1] == '1':
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit('API was not scraped successfully')
+          PY
+      - if: always()
+        run: docker compose logs --no-color --tail=100
+      - if: always()
+        run: docker compose down -v
+  kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: stormpilot
+      - run: |
+          docker build -t stormpilot:local .
+          kind load docker-image stormpilot:local --name stormpilot
+          kubectl --context kind-stormpilot apply -f k8s/base.yaml
+          kubectl --context kind-stormpilot -n stormpilot-lab rollout status deployment/stormpilot --timeout=180s
+      - name: Validate HPA manifest without enabling it
+        run: kubectl --context kind-stormpilot apply --dry-run=server -f k8s/hpa.yaml
+      - name: Verify initial readiness, pod replacement and recovered API
+        run: |
+          set -euo pipefail
+          kubectl --context kind-stormpilot -n stormpilot-lab port-forward service/stormpilot 8081:80 > /tmp/stormpilot-forward.log 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          python scripts/smoke.py --port 8081
+          kill "$forward_pid"
+          wait "$forward_pid" || true
+          CONFIRM_CHAOS=yes bash scripts/chaos.sh
+          kubectl --context kind-stormpilot -n stormpilot-lab port-forward service/stormpilot 8081:80 > /tmp/stormpilot-forward.log 2>&1 &
+          forward_pid=$!
+          python scripts/smoke.py --port 8081
+      - if: always()
+        run: |
+          kubectl --context kind-stormpilot -n stormpilot-lab get pods -o wide
+          kubectl --context kind-stormpilot -n stormpilot-lab get events --sort-by=.metadata.creationTimestamp

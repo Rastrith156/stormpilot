@@ -1,0 +1,17 @@
+groups:
+  - name: stormpilot
+    rules:
+      - alert: StormPilotUnavailable
+        expr: up{job="stormpilot"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: StormPilot scrape target is unavailable
+      - alert: StormPilotServerErrors
+        expr: sum(rate(stormpilot_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(stormpilot_requests_total[5m])), 0.001) > 0.01
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than one percent server errors
