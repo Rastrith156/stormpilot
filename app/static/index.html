@@ -3,106 +3,198 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StormPilot — Project Management</title>
+<meta name="theme-color" content="#f4f5f2">
+<meta name="description" content="StormPilot local dispatch reliability and delivery planning console.">
+<title>StormPilot — Dispatch operations</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="/">StormPilot<span class="brand-sub">PM</span></a>
-  <nav class="tabs" aria-label="Modules">
-    <button class="tab active" data-view="scrum" type="button">Scrum</button>
-    <button class="tab" data-view="kanban" type="button">Kanban</button>
-  </nav>
-  <a class="api-link" href="/" title="JSON API">API</a>
-</header>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<div class="app-layout">
+  <aside class="sidebar" aria-label="Main navigation">
+    <a class="brand" href="#overview" aria-label="StormPilot overview">
+      <span class="brand-mark" aria-hidden="true">S</span>
+      <span class="brand-name">stormpilot<span>RELIABILITY LAB</span></span>
+    </a>
+    <span class="nav-caption">WORKSPACE</span>
+    <nav class="tabs" aria-label="Workspace">
+      <button class="tab active" data-view="overview" type="button"><span class="nav-icon overview-icon" aria-hidden="true"></span>Overview</button>
+      <button class="tab" data-view="scrum" type="button"><span class="nav-icon plan-icon" aria-hidden="true"></span>Delivery plan</button>
+      <button class="tab" data-view="kanban" type="button"><span class="nav-icon board-icon" aria-hidden="true"></span>Kanban board</button>
+    </nav>
+    <div class="sidebar-spacer"></div>
+    <div class="environment-card">
+      <span class="environment-dot" aria-hidden="true"></span>
+      <span><strong>Local sandbox</strong><small>Isolated demo environment</small></span>
+    </div>
+    <a class="api-link" href="/" title="Open the service identity endpoint">Service API <span aria-hidden="true">↗</span></a>
+  </aside>
 
-<main>
-  <!-- ============================== SCRUM ============================== -->
-  <section id="view-scrum" class="view">
+<main id="main-content" class="main-content">
+  <section id="view-overview" class="view overview-view">
+    <header class="page-header overview-header">
+      <div>
+        <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> RESILIENCE CONSOLE <span class="eyebrow-divider">/</span> LOCAL ENVIRONMENT</p>
+        <h1>Dispatch operations</h1>
+        <p class="page-description">A live read on the service behind the simulated emergency-delivery workflow.</p>
+      </div>
+      <div class="header-actions">
+        <span id="overview-updated" class="updated-label">Checking service…</span>
+        <button id="overview-refresh" class="btn btn-ghost" type="button"><span class="button-glyph" aria-hidden="true">↻</span> Refresh</button>
+        <button id="dispatch-run" class="btn btn-primary" type="button"><span class="button-glyph" aria-hidden="true">↗</span> Run test dispatch</button>
+      </div>
+    </header>
+
+    <section class="metric-grid" aria-label="Live service metrics">
+      <article class="metric-card service-metric">
+        <div class="metric-heading"><span>API availability</span><span class="metric-symbol availability-symbol" aria-hidden="true">◉</span></div>
+        <div class="metric-value" id="metric-health">Checking</div>
+        <div class="metric-foot"><span id="metric-health-dot" class="status-dot" aria-hidden="true"></span><span id="metric-health-detail">Probing health and readiness</span></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-heading"><span>Dispatch requests</span><span class="metric-symbol dispatch-symbol" aria-hidden="true">↗</span></div>
+        <div class="metric-value" id="metric-dispatches">—</div>
+        <div class="metric-foot">Successful requests reported by this process</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-heading"><span>Process uptime</span><span class="metric-symbol uptime-symbol" aria-hidden="true">◷</span></div>
+        <div class="metric-value" id="metric-uptime">—</div>
+        <div class="metric-foot" id="metric-instance">Waiting for service identity</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-heading"><span>Open work</span><span class="metric-symbol work-symbol" aria-hidden="true">▤</span></div>
+        <div class="metric-value" id="metric-open-work">0</div>
+        <div class="metric-foot"><span id="metric-work-detail">Tasks across all delivery stages</span><button class="text-action" type="button" data-go-view="scrum">View plan <span aria-hidden="true">→</span></button></div>
+      </article>
+    </section>
+
+    <section class="operations-grid" aria-label="Dispatch and service details">
+      <article class="surface dispatch-surface">
+        <div class="surface-heading">
+          <div><p class="section-kicker">DISPATCH SIMULATOR</p><h2>Verify the delivery path</h2></div>
+          <span class="simulation-tag">SIMULATED</span>
+        </div>
+        <p class="surface-copy">Send a real request to the local dispatch endpoint. The service performs its bounded workload and returns a route checksum; no drone or delivery is involved.</p>
+        <div class="dispatch-endpoint"><span class="method-tag">GET</span><code>/dispatch</code><span class="endpoint-local">This service</span></div>
+        <div id="dispatch-result" class="dispatch-result" aria-live="polite">
+          <span class="result-mark" aria-hidden="true">↗</span>
+          <span><strong>Ready for a test request</strong><small>Your response will appear here.</small></span>
+        </div>
+        <div class="dispatch-footer"><span>Requests are sent to the API currently serving this page.</span><a href="/metrics">View raw metrics <span aria-hidden="true">↗</span></a></div>
+      </article>
+
+      <article class="surface checks-surface">
+        <div class="surface-heading"><div><p class="section-kicker">SERVICE CHECKS</p><h2>Runtime signals</h2></div><span id="service-version" class="version-tag">VERSION —</span></div>
+        <div class="check-row"><span class="check-icon" aria-hidden="true">/</span><span class="check-copy"><strong>Liveness probe</strong><small>Process responds to health check</small></span><span id="check-liveness" class="check-state">Checking</span></div>
+        <div class="check-row"><span class="check-icon ready-icon" aria-hidden="true">✓</span><span class="check-copy"><strong>Readiness probe</strong><small>Instance can receive traffic</small></span><span id="check-readiness" class="check-state">Checking</span></div>
+        <div class="check-row"><span class="check-icon metrics-icon" aria-hidden="true">#</span><span class="check-copy"><strong>Prometheus metrics</strong><small>Process counters and uptime</small></span><span id="check-metrics" class="check-state">Checking</span></div>
+        <div class="checks-note"><span class="status-dot" aria-hidden="true"></span><span id="service-instance">Connecting to service identity…</span></div>
+        <div class="probe-trend">
+          <div class="probe-trend-heading"><span>Health probe latency</span><span id="probe-window">Collecting measurements</span></div>
+          <div class="probe-chart-wrap">
+            <svg id="probe-chart" class="probe-chart" viewBox="0 0 360 76" role="img" aria-label="No health probe measurements yet" preserveAspectRatio="none"></svg>
+            <span id="probe-empty" class="probe-empty">Waiting for the first health check</span>
+          </div>
+          <div class="probe-stats">
+            <span><strong id="probe-latest">—</strong><small>Latest</small></span>
+            <span><strong id="probe-average">—</strong><small>Session average</small></span>
+            <span class="probe-endpoint">GET <code>/healthz</code></span>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="lower-grid" aria-label="Recent activity and delivery work">
+      <article class="surface activity-surface">
+        <div class="surface-heading"><div><p class="section-kicker">THIS BROWSER</p><h2>Recent test dispatches</h2></div><span id="activity-count" class="count-tag">0 requests</span></div>
+        <div id="dispatch-activity" class="activity-list"><div class="empty-state">No test dispatches recorded in this browser yet.</div></div>
+        <p class="local-note">Activity is stored locally in this browser; it is not an API audit log.</p>
+      </article>
+      <article class="surface work-surface">
+        <div class="surface-heading"><div><p class="section-kicker">DELIVERY PLANNING</p><h2>Current work</h2></div><button class="text-action" type="button" data-go-view="scrum">Open plan <span aria-hidden="true">→</span></button></div>
+        <div id="overview-work" class="work-list"><div class="empty-state">Loading delivery work…</div></div>
+      </article>
+    </section>
+    <footer class="page-footer"><span>StormPilot reliability lab</span><span>Educational simulation · not connected to real aircraft</span></footer>
+  </section>
+
+  <section id="view-scrum" class="view planning-view" hidden>
+    <header class="page-header compact-header"><div><p class="eyebrow">DELIVERY PLANNING <span class="eyebrow-divider">/</span> ITERATION MANAGEMENT</p><h1>Plan the work</h1><p class="page-description">Shape delivery goals, organize the backlog and track sprint progress.</p></div><button id="scrum-new-task" class="btn btn-primary" type="button"><span class="button-glyph" aria-hidden="true">＋</span> New task</button></header>
     <div class="panel">
-      <h2>Product backlog</h2>
+      <div class="panel-heading"><div><p class="section-kicker">PRODUCT BACKLOG</p><h2>Stories</h2></div></div>
       <form id="story-form" class="form-grid">
-        <input name="title" placeholder="User story title" maxlength="200" required>
-        <input name="description" placeholder="Description (optional)" maxlength="5000">
-        <select name="priority">
-          <option value="low">Low</option>
-          <option value="medium" selected>Medium</option>
-          <option value="high">High</option>
-          <option value="critical">Critical</option>
+        <input name="title" placeholder="User story title" aria-label="User story title" maxlength="200" required>
+        <input name="description" placeholder="Description (optional)" aria-label="Story description" maxlength="5000">
+        <select name="priority" aria-label="Story priority">
+          <option value="low">Low priority</option>
+          <option value="medium" selected>Medium priority</option>
+          <option value="high">High priority</option>
+          <option value="critical">Critical priority</option>
         </select>
-        <input name="points" type="number" min="0" max="1000" value="0" title="Story points">
-        <select name="sprint_id" id="story-sprint-select"><option value="">Backlog</option></select>
-        <button type="submit">Add story</button>
+        <input name="points" type="number" min="0" max="1000" value="0" title="Story points" aria-label="Story points">
+        <select name="sprint_id" id="story-sprint-select" aria-label="Assign story to sprint"><option value="">Backlog</option></select>
+        <button class="btn btn-primary" type="submit">Add story</button>
       </form>
       <ul id="story-list" class="card-list"></ul>
     </div>
 
     <div class="panel">
-      <h2>Sprints</h2>
+      <div class="panel-heading"><div><p class="section-kicker">ITERATION MANAGEMENT</p><h2>Sprints</h2></div></div>
       <form id="sprint-form" class="form-grid">
-        <input name="name" placeholder="Sprint name" maxlength="200" required>
-        <input name="goal" placeholder="Sprint goal" maxlength="5000">
+        <input name="name" placeholder="Sprint name" aria-label="Sprint name" maxlength="200" required>
+        <input name="goal" placeholder="Sprint goal" aria-label="Sprint goal" maxlength="5000">
         <input name="start_date" type="date" required title="Start date">
         <input name="end_date" type="date" required title="End date">
-        <button type="submit">Create sprint</button>
+        <button class="btn btn-primary" type="submit">Create sprint</button>
       </form>
       <div id="sprint-list" class="sprint-grid"></div>
     </div>
 
     <div class="panel">
-      <h2>Tasks &amp; sprint assignment</h2>
-      <button id="scrum-new-task" class="btn" type="button">New task</button>
+      <div class="panel-heading"><div><p class="section-kicker">ASSIGNMENTS</p><h2>Tasks &amp; sprint assignment</h2></div></div>
       <div class="table-wrap">
         <table id="task-table">
-          <thead>
-            <tr><th>Task</th><th>Sprint</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Due</th><th></th></tr>
-          </thead>
+          <thead><tr><th>Task</th><th>Sprint</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Due</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
     </div>
   </section>
 
-  <!-- ============================= KANBAN ============================== -->
   <section id="view-kanban" class="view" hidden>
-    <div class="board-toolbar">
-      <button id="kanban-new-task" class="btn" type="button">New task</button>
+    <header class="page-header compact-header board-page-header"><div><p class="eyebrow">DELIVERY PLANNING <span class="eyebrow-divider">/</span> FLOW MANAGEMENT</p><h1>Kanban board</h1><p class="page-description">Move work through delivery and keep in-progress limits visible.</p></div><div class="board-toolbar">
       <button id="wip-toggle" class="btn btn-ghost" type="button">WIP limits</button>
-      <form id="wip-form" class="wip-form" hidden>
-        <label>To Do <input name="todo" type="number" min="0" placeholder="∞"></label>
-        <label>In Progress <input name="in_progress" type="number" min="0" placeholder="∞"></label>
-        <label>Testing <input name="testing" type="number" min="0" placeholder="∞"></label>
-        <label>Done <input name="done" type="number" min="0" placeholder="∞"></label>
-        <button type="submit">Save limits</button>
-      </form>
-    </div>
+      <button id="kanban-new-task" class="btn btn-primary" type="button"><span class="button-glyph" aria-hidden="true">＋</span> New task</button>
+    </div></header>
+    <form id="wip-form" class="wip-form" hidden>
+      <label>To Do <input name="todo" type="number" min="0" placeholder="∞"></label>
+      <label>In Progress <input name="in_progress" type="number" min="0" placeholder="∞"></label>
+      <label>Testing <input name="testing" type="number" min="0" placeholder="∞"></label>
+      <label>Done <input name="done" type="number" min="0" placeholder="∞"></label>
+      <button class="btn btn-primary" type="submit">Save limits</button>
+    </form>
     <div id="board" class="board"></div>
   </section>
 </main>
+</div>
 
-<!-- ============================ TASK MODAL ============================ -->
 <div id="task-modal" class="modal-backdrop" hidden>
-  <form id="task-form" class="modal">
-    <h3 id="task-modal-title">New task</h3>
+  <form id="task-form" class="modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+    <div class="modal-heading"><div><p class="section-kicker">DELIVERY WORK</p><h2 id="task-modal-title">New task</h2></div><button type="button" id="task-cancel" class="modal-close" aria-label="Close dialog">×</button></div>
     <input type="hidden" name="id">
     <label>Title <input name="title" maxlength="200" required></label>
     <label>Description <textarea name="description" maxlength="5000" rows="3"></textarea></label>
     <div class="form-row">
       <label>Priority
         <select name="priority">
-          <option value="low">Low</option>
-          <option value="medium" selected>Medium</option>
-          <option value="high">High</option>
-          <option value="critical">Critical</option>
+          <option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="critical">Critical</option>
         </select>
       </label>
       <label>Status
-        <select name="status">
-          <option value="todo">To Do</option>
-          <option value="in_progress">In Progress</option>
-          <option value="testing">Testing</option>
-          <option value="done">Done</option>
-        </select>
+        <select name="status"><option value="todo">To Do</option><option value="in_progress">In Progress</option><option value="testing">Testing</option><option value="done">Done</option></select>
       </label>
     </div>
     <div class="form-row">
@@ -114,12 +206,41 @@
       <label>Story <select name="story_id" id="task-story-select"><option value="">None</option></select></label>
     </div>
     <div class="modal-actions">
-      <button type="button" id="task-delete" class="btn btn-danger">Delete</button>
+      <button type="button" id="task-delete" class="btn btn-danger">Delete task</button>
       <span class="spacer"></span>
-      <button type="button" id="task-cancel" class="btn btn-ghost">Cancel</button>
-      <button type="submit" class="btn">Save</button>
+      <button type="submit" class="btn btn-primary">Save task</button>
     </div>
   </form>
+</div>
+
+<div id="record-modal" class="modal-backdrop" hidden>
+  <form id="record-form" class="modal" role="dialog" aria-modal="true" aria-labelledby="record-modal-title">
+    <div class="modal-heading">
+      <div><p id="record-modal-kicker" class="section-kicker">DELIVERY PLANNING</p><h2 id="record-modal-title">Edit record</h2></div>
+      <button type="button" id="record-cancel-icon" class="modal-close" aria-label="Close dialog">×</button>
+    </div>
+    <div id="record-fields" class="record-fields"></div>
+    <div class="modal-actions">
+      <button type="button" id="record-cancel" class="btn btn-ghost">Cancel</button>
+      <span class="spacer"></span>
+      <button type="submit" class="btn btn-primary"><span class="button-glyph" aria-hidden="true">✓</span> Save changes</button>
+    </div>
+  </form>
+</div>
+
+<div id="confirm-modal" class="modal-backdrop" hidden>
+  <section class="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="modal-heading">
+      <div><p class="section-kicker">CONFIRM ACTION</p><h2 id="confirm-title">Delete record?</h2></div>
+      <button type="button" id="confirm-close" class="modal-close" aria-label="Cancel">×</button>
+    </div>
+    <p id="confirm-message" class="confirm-message"></p>
+    <div class="modal-actions">
+      <button type="button" id="confirm-cancel" class="btn btn-ghost">Keep record</button>
+      <span class="spacer"></span>
+      <button type="button" id="confirm-accept" class="btn btn-danger">Delete</button>
+    </div>
+  </section>
 </div>
 
 <div id="toast" role="status" aria-live="polite" hidden></div>
