@@ -5,10 +5,11 @@ An advanced portfolio DevOps project: pretend your drone-dispatch API serves eme
 ## Architecture
 
 ```text
+Team users → Caddy HTTPS → OAuth2 Proxy (OIDC) → private StormPilot API → Redmine REST API
 GitHub push → tests + Compose/kind integration → Trivy gate → GHCR SHA-tagged image
-                                                         ↓ manual release
-Local users → Kubernetes Service → 2–5 API replicas ← HPA (metrics-server)
-                                    ↑ probes / Deployment reconciliation
+                                                         ↓ manual lab release
+Kubernetes Service → 2–5 API replicas ← HPA (metrics-server)
+                    ↑ probes / Deployment reconciliation
 Chaos script → delete ONE lab pod → replacement pod
 
 Separate Docker Compose demo:
@@ -19,13 +20,14 @@ Users → API ← Prometheus ← Grafana
 
 ## Included
 - Dependency-free Python API with structured logs and Prometheus metrics.
-- Six HTTP integration tests; non-root, read-only container configuration.
+- HTTP service and mocked Redmine integration tests; non-root, read-only container configuration.
 - GitHub Actions tests, vulnerability gate, GHCR publishing, SBOM and provenance.
-- Kubernetes rolling deployments, readiness/liveness/startup probes and resource budgets.
+- Bounded Waitress WSGI production server, HTTPS gateway and OIDC authentication profile.
+- Kubernetes rolling deployments, readiness/liveness/startup probes and resource budgets for the lab.
 - CPU HPA manifest (requires metrics-server), PodDisruptionBudget, restricted pod security.
 - A namespace- and context-restricted pod-deletion experiment.
 - Provisioned Grafana dashboard and Prometheus alert rules in Compose.
-- Read-only OpenProject API integration with server-side credentials and a responsive project workspace.
+- Read-only Redmine REST API integration with server-side credentials and a responsive project workspace.
 - Bounded local load generator, demo guide, rollback and incident runbook.
 
 ## Prerequisites
@@ -40,7 +42,7 @@ python3 -m unittest discover -s tests -v
 ```bash
 cp .env.example .env
 # Edit .env and choose a strong, unique local Grafana password.
-docker compose up --build -d
+docker compose -f compose.yaml -f compose.dev.yaml up --build -d
 curl http://localhost:8080/dispatch
 python3 scripts/load.py --seconds 30 --workers 4
 ```
@@ -49,7 +51,7 @@ python3 scripts/load.py --seconds 30 --workers 4
 - Grafana: http://localhost:3000 — username `admin`, password from `.env`; open StormPilot Reliability.
 - Metrics: http://localhost:8080/metrics
 
-To trigger the availability alert: `docker compose stop api`, wait at least 40 seconds, inspect Prometheus Alerts, then `docker compose start api`. Alertmanager is NOT configured: rules appear in Prometheus, but no email or Slack is sent. The example server does not normally emit 5xx; the server-error rule is a future instrumentation example.
+To trigger the availability alert: `docker compose -f compose.yaml -f compose.dev.yaml stop api`, wait at least 40 seconds, inspect Prometheus Alerts, then `docker compose -f compose.yaml -f compose.dev.yaml start api`. Alertmanager is NOT configured: rules appear in Prometheus, but no email or Slack is sent. The example server does not normally emit 5xx; the server-error rule is a future instrumentation example.
 
 ## 3. Kubernetes self-healing demo
 ```bash
@@ -79,7 +81,7 @@ kubectl --context kind-stormpilot -n stormpilot-lab get hpa,pods -w
 Run the watch in another terminal, Ctrl+C to stop. Scaling depends on actual CPU and sampling windows, and is not guaranteed by a fixed load. For a realistic test use an in-cluster load client through the Service; port-forward targets just one pod. After enabling HPA, avoid repeatedly applying `replicas: 2`, which can temporarily reset HPA-managed scale.
 
 ## 5. CI and releases
-Target repository: `Rastrith156/stormpilot` (private by default). See docs/GITHUB_SETUP.md for secure publishing instructions. Create the repository and push this folder to `main`. The workflow tests and scans PRs, runs Compose and disposable kind integration tests, then publishes on main pushes only after all gates pass. The Kubernetes test checks API readiness before and after one-pod deletion; HPA receives server-side manifest validation, but actual scaling is not tested. Ensure Actions has package write permission. Pull requests do not receive publishing credentials. A fixable CRITICAL vulnerability blocks publication: update the affected base image rather than disabling the check. Versions in these files are starting pins, not claims that the images are currently vulnerability-free. For stricter supply-chain controls, pin images by digest and Actions by reviewed commit SHA.
+Target repository: `Rastrith156/stormpilot` (private by default). See docs/GITHUB_SETUP.md for secure publishing instructions. Create the repository and push this folder to `main`. The workflow tests and scans PRs, validates both Compose profiles, runs the local Compose and disposable kind integration checks, then publishes on main pushes only after all gates pass. The Kubernetes test checks API readiness before and after one-pod deletion; HPA receives server-side manifest validation, but actual scaling is not tested. Ensure Actions has package write permission. Pull requests do not receive publishing credentials. A fixable CRITICAL vulnerability blocks publication: update the affected base image rather than disabling the check. Versions in these files are starting pins, not claims that the images are currently vulnerability-free. For stricter supply-chain controls, pin images by digest and Actions by reviewed commit SHA.
 
 Publishing is configured; automatic cluster deployment is intentionally NOT configured. After a successful build, use the actual lowercase owner/repository and full commit SHA:
 ```bash
@@ -88,17 +90,31 @@ kubectl --context kind-stormpilot -n stormpilot-lab rollout status deployment/st
 ```
 Replace placeholders before running. The image must be publicly pullable, or configure a namespace-scoped registry pull secret securely. Never commit a token. For a local offline release, build a new unique local tag and load it into kind first. See docs/RUNBOOK.md for rollback.
 
-## 6. OpenProject workspace
-Open `http://localhost:8080/ui`. Without OpenProject configuration the dispatch console still works and the workspace shows setup guidance. To connect an instance, copy `.env.example` to `.env`, set `OPENPROJECT_URL` to the instance base URL and `OPENPROJECT_API_TOKEN` to a read-only API token, then restart Compose. The token is sent only from the StormPilot server to OpenProject and is never returned to the browser. The workspace displays visible projects and recently updated work packages with links to their OpenProject pages.
+## 6. Redmine workspace
+Open `http://localhost:8080/ui`. The development Compose overlay binds StormPilot only to loopback. Without Redmine credentials the dispatch console still works and the workspace shows setup guidance. Enable REST API access in Redmine, copy `.env.example` to `.env`, set `REDMINE_URL` to the instance base URL and `REDMINE_API_KEY` to an API key, then restart Compose. The key is sent only from the StormPilot server to Redmine and is never returned to the browser. The workspace displays visible projects and recently updated open issues with links to their Redmine pages.
 
-The integration uses OpenProject's REST API v3 and performs read-only requests. It does not provide OpenProject authentication for StormPilot users, mutate work packages, or make the local app suitable for public exposure. In Kubernetes, set `OPENPROJECT_URL` in `k8s/base.yaml`; optionally create a Secret with `kubectl --context kind-stormpilot -n stormpilot-lab create secret generic openproject-credentials --from-literal=api-token="$OPENPROJECT_API_TOKEN"`. Store the token in the shell environment first. Use a trusted local environment and protect the secret through your cluster's normal controls.
+The integration uses Redmine's JSON REST API and performs read-only requests. It does not mutate issues. Kubernetes manifests and the direct local development server are for the disposable lab only; do not expose either directly to a team network.
+
+## 7. Private team deployment
+The production Compose profile places the API on a private container network behind Caddy HTTPS and OAuth2 Proxy. Sign-in uses your existing OIDC provider; access is restricted by an allowed email domain. Before starting it, configure an internal DNS name for the host, a confidential OIDC client with redirect URI `https://YOUR_HOSTNAME/oauth2/callback`, and a Redmine API key with only the read permissions required by the team. The team hostname must resolve to this host and client devices must trust Caddy's internal CA. Do not port-forward or publish the API container port. Choose a Docker subnet that does not overlap your LAN, VPN, or other container networks and set `DOCKER_PRIVATE_SUBNET` consistently; OAuth2 Proxy trusts forwarded headers only from that gateway subnet.
+
+Copy `.env.example` to `.env`, replace every example hostname/domain, and set `APP_HOSTNAME`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_ALLOWED_EMAIL_DOMAIN`, and `REDMINE_URL`. Create the secret files named by the `*_FILE` settings. Store the Redmine API key and OIDC client secret as plain text files with restricted permissions and no trailing newline. Generate the OAuth cookie secret as exactly 32 random bytes, for example with `openssl rand 32 > secrets/oauth_cookie_secret`; that file is binary and must not have a newline. Keep the `secrets` directory out of backups that are not encrypted and never commit it.
+
+Run the production gateway:
+```bash
+docker compose -f compose.yaml -f compose.production.yaml --profile production config --quiet
+docker compose -f compose.yaml -f compose.production.yaml --profile production up --build -d
+```
+Caddy uses its internal CA for this private deployment. Export its root certificate with `docker compose -f compose.yaml -f compose.production.yaml exec gateway cat /data/caddy/pki/authorities/local/root.crt` and distribute it to team devices through a trusted device-management channel. Keep the Caddy data volume, which holds the CA private key, backed up and access-controlled. For a public-facing deployment, use a publicly trusted certificate and have the security team review the network, identity-provider, and secret-management configuration first.
+
+The private profile authenticates requests at the gateway and the app remains stateless. Configure your OIDC provider and Redmine instance before relying on the service; this repository does not provision either external system. The Kubernetes files remain a local reliability lab and are not the production deployment path.
 
 ## Project status and limitations
-The archive provides implementation and instructions, not a deployed cloud service. See VALIDATION.md for checks actually executed. Kubernetes recovery, autoscaling, image scans and GitHub publishing need your environment for end-to-end verification. This is an educational HTTP server, not production-ready drone software. It has no authentication, TLS ingress, durable dispatch storage, multizone failover or automatic rollback. Do not expose it publicly.
+StormPilot is an internal Redmine portal and educational reliability lab, not drone-control software. Production access requires the documented OIDC gateway; the direct development server and Kubernetes lab do not provide user authentication. The project does not configure your OIDC provider, Redmine permissions, DNS, or device trust for you. Review current vulnerability scans and your organization's deployment controls before production use.
 
 ## Cleanup
 ```bash
-docker compose down -v
+docker compose -f compose.yaml -f compose.dev.yaml down -v
 kind delete cluster --name stormpilot
 ```
 Cleanup removes the local demo environment; save screenshots or evidence first. GHCR images and the GitHub repository are unaffected.
@@ -107,4 +123,4 @@ Cleanup removes the local demo environment; save screenshots or evidence first. 
 Argo CD GitOps; Argo Rollouts canary analysis; OpenTelemetry traces; kube-prometheus-stack with ServiceMonitor; Terraform for a budget-controlled cloud environment; signed images and admission policies; persistent dispatch queues; external uptime probes and measured recovery SLOs.
 
 ## Convenience commands
-`make test`, `make run`, `make smoke`, `make up`, `make down`, `make kind-up`, and `make chaos` are provided. `make up` requires a configured `.env`. Run `make run` in a separate terminal before `make smoke`. The direct Python and Docker commands above work without Make.
+`make test`, `make run`, `make smoke`, `make up`, `make down`, `make kind-up`, and `make chaos` are provided. `make up` starts the loopback-only development Compose overlay and requires a configured `.env`. Run `make run` in a separate terminal before `make smoke`. Use the production profile above for team access.

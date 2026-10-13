@@ -15,11 +15,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: docker compose config --quiet
-      - run: docker compose up --build -d --wait --wait-timeout 120
+      - run: docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+      - name: Validate private-team deployment configuration
+        run: |
+          set -euo pipefail
+          secret_dir=$(mktemp -d)
+          trap 'rm -rf "$secret_dir"' EXIT
+          printf 'ci-placeholder' > "$secret_dir/redmine"
+          printf 'ci-placeholder' > "$secret_dir/oidc"
+          head -c 32 /dev/urandom > "$secret_dir/cookie"
+          export APP_HOSTNAME=stormpilot.example.internal
+          export OIDC_ISSUER_URL=https://identity.example.com
+          export OIDC_CLIENT_ID=stormpilot-ci
+          export OIDC_ALLOWED_EMAIL_DOMAIN=example.com
+          export REDMINE_URL=https://redmine.example.internal
+          export REDMINE_API_KEY_FILE="$secret_dir/redmine"
+          export OIDC_CLIENT_SECRET_FILE="$secret_dir/oidc"
+          export OAUTH_COOKIE_SECRET_FILE="$secret_dir/cookie"
+          docker compose -f compose.yaml -f compose.production.yaml --profile production config --quiet
+      - run: docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120
       - run: python scripts/smoke.py
       - name: Validate Prometheus configuration and alert rules
-        run: docker compose exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+        run: docker compose -f compose.yaml -f compose.dev.yaml exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
       - name: Check monitoring endpoints
         run: |
           curl --fail --retry 15 --retry-connrefused --retry-delay 2 http://127.0.0.1:9090/-/ready
@@ -39,9 +56,9 @@ jobs:
               raise SystemExit('API was not scraped successfully')
           PY
       - if: always()
-        run: docker compose logs --no-color --tail=100
+        run: docker compose -f compose.yaml -f compose.dev.yaml logs --no-color --tail=100
       - if: always()
-        run: docker compose down -v
+        run: docker compose -f compose.yaml -f compose.dev.yaml down -v
   kubernetes:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,20 +1,23 @@
 services:
   api:
     build: .
-    ports: ["127.0.0.1:8080:8080"]
     read_only: true
+    tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     environment:
-      OPENPROJECT_URL: ${OPENPROJECT_URL:-}
-      OPENPROJECT_API_TOKEN: ${OPENPROJECT_API_TOKEN:-}
+      REDMINE_URL: ${REDMINE_URL:-}
+      REDMINE_API_KEY: ${REDMINE_API_KEY:-}
+    networks: [default, edge]
   prometheus:
     image: prom/prometheus:v3.2.1
     ports: ["127.0.0.1:9090:9090"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=15d"]
   grafana:
     image: grafana/grafana:11.6.0
     ports: ["127.0.0.1:3000:3000"]
@@ -24,3 +27,14 @@ services:
     volumes:
       - ./monitoring/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${DOCKER_PRIVATE_SUBNET:-172.30.80.0/24}
+
+volumes:
+  prometheus-data:
+  grafana-data:

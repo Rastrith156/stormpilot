@@ -21,7 +21,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path.startswith('/api/'):
-            status = api.handle(self, 'GET', path)
+            status, payload = api.handle('GET', path)
+            self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
             return
@@ -81,13 +82,24 @@ class Handler(BaseHTTPRequestHandler):
     def _write_api(self, method):
         path = urlparse(self.path).path
         if path.startswith('/api/'):
-            status = api.handle(self, method, path)
+            status, payload = api.handle(method, path)
+            self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
             return
         payload = json.dumps({'error': 'not found'}).encode()
         self.send_response(404)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _send_json(self, status, body):
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -122,4 +134,4 @@ class Handler(BaseHTTPRequestHandler):
         print(json.dumps({'event': 'http', 'message': fmt % args}), flush=True)
 
 if __name__ == '__main__':
-    ThreadingHTTPServer(('0.0.0.0', int(os.getenv('PORT', '8080'))), Handler).serve_forever()
+    ThreadingHTTPServer((os.getenv('HOST', '127.0.0.1'), int(os.getenv('PORT', '8080'))), Handler).serve_forever()

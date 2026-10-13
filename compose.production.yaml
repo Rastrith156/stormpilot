@@ -1,0 +1,74 @@
+services:
+  api:
+    environment:
+      REDMINE_API_KEY: ""
+      REDMINE_API_KEY_FILE: /run/secrets/redmine_api_key
+    secrets:
+      - redmine_api_key
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    profiles: [production]
+    restart: unless-stopped
+    depends_on:
+      - api
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=${OIDC_ISSUER_URL}
+      - --client-id=${OIDC_CLIENT_ID}
+      - --client-secret-file=/run/secrets/oidc_client_secret
+      - --redirect-url=https://${APP_HOSTNAME}/oauth2/callback
+      - --email-domain=${OIDC_ALLOWED_EMAIL_DOMAIN}
+      - --scope=openid email profile
+      - --code-challenge-method=S256
+      - --upstream=http://api:8080/
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --trusted-proxy-ip=${DOCKER_PRIVATE_SUBNET:-172.30.80.0/24}
+      - --skip-provider-button=true
+      - --cookie-secret-file=/run/secrets/oauth_cookie_secret
+      - --cookie-name=__Host-stormpilot
+      - --cookie-secure=true
+      - --cookie-httponly=true
+      - --cookie-samesite=lax
+      - --cookie-expire=8h
+      - --cookie-refresh=1h
+      - --session-cookie-minimal=true
+      - --logging-format=json
+    secrets:
+      - oidc_client_secret
+      - oauth_cookie_secret
+    expose: [4180]
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+
+  gateway:
+    image: caddy:2.11.7
+    profiles: [production]
+    restart: unless-stopped
+    depends_on:
+      - oauth2-proxy
+    environment:
+      APP_HOSTNAME: ${APP_HOSTNAME}
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [edge]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    security_opt: ["no-new-privileges:true"]
+
+secrets:
+  redmine_api_key:
+    file: ${REDMINE_API_KEY_FILE:-./secrets/redmine_api_key}
+  oidc_client_secret:
+    file: ${OIDC_CLIENT_SECRET_FILE:-./secrets/oidc_client_secret}
+  oauth_cookie_secret:
+    file: ${OAUTH_COOKIE_SECRET_FILE:-./secrets/oauth_cookie_secret}
+
+volumes:
+  caddy-data:
+  caddy-config:

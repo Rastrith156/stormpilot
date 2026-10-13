@@ -1,111 +1,96 @@
-"""Read-only OpenProject API proxy for the StormPilot UI."""
-import base64
+"""Read-only Redmine API proxy for the StormPilot UI."""
 import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-def handle(handler, method, path):
-    if method != 'GET' or path != '/api/openproject':
-        _send(handler, 404, {'error': 'not found'})
-        return 404
-    base = os.getenv('OPENPROJECT_URL', '').strip().rstrip('/')
-    token = os.getenv('OPENPROJECT_API_TOKEN', '').strip()
-    if not base or not token:
-        _send(handler, 200, {'configured': False})
-        return 200
+def handle(method, path):
+    if method != 'GET' or path != '/api/redmine':
+        return 404, {'error': 'not found'}
+    base = os.getenv('REDMINE_URL', '').strip().rstrip('/')
+    api_key = os.getenv('REDMINE_API_KEY', '').strip()
+    key_file = os.getenv('REDMINE_API_KEY_FILE')
+    if key_file:
+        try:
+            with open(key_file, encoding='utf-8') as file:
+                api_key = file.read().strip()
+        except OSError:
+            return 503, {'error': 'Redmine credentials are unavailable on the server.'}
+    if not base or not api_key:
+        return 200, {'configured': False}
     parsed = urlsplit(base)
     if (parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username
             or parsed.password or parsed.query or parsed.fragment):
-        _send(handler, 200, {'configured': False, 'message': 'OpenProject configuration is invalid.'})
-        return 200
+        return 200, {'configured': False, 'message': 'Redmine configuration is invalid.'}
     try:
-        projects = _get(base, token, '/api/v3/projects?filters=%5B%5D&offset=1&pageSize=100')
-        work = _get(
-            base, token,
-            '/api/v3/work_packages?filters=%5B%5D&offset=1&pageSize=20'
-            '&sortBy=%5B%5B%22updatedAt%22%2C%22desc%22%5D%5D')
-        project_rows = _elements(projects)
-        work_rows = _elements(work)
+        projects = _get(base, api_key, '/projects.json?limit=100')
+        issues = _get(base, api_key, '/issues.json?status_id=open&limit=20&sort=updated_on%3Adesc')
+        project_rows = _elements(projects, 'projects')
+        issue_rows = _elements(issues, 'issues')
         result = {
             'configured': True,
             'instance_url': base,
-            'projects': [_project(p, base) for p in project_rows],
-            'work_packages': [_work_package(w, base) for w in work_rows],
+            'projects': [_project(project, base) for project in project_rows],
+            'issues': [_issue(issue, base) for issue in issue_rows],
             'counts': {
-                'projects': _count(projects, project_rows),
-                'work_packages': _count(work, work_rows),
+                'projects': projects.get('total_count', len(project_rows)),
+                'issues': issues.get('total_count', len(issue_rows)),
             },
         }
-        _send(handler, 200, result)
-        return 200
+        return 200, result
     except HTTPError as exc:
         if exc.code in (401, 403):
-            message = 'OpenProject rejected the API token. Check the token and its read permissions.'
+            message = 'Redmine rejected the API key. Check the key and REST API permissions.'
         else:
-            message = 'OpenProject could not complete the request. Check the instance and try again.'
-        _send(handler, 502, {'error': message})
-        return 502
+            message = 'Redmine could not complete the request. Check the instance and try again.'
+        return 502, {'error': message}
     except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
-        _send(handler, 502, {'error': 'OpenProject is unavailable or returned an invalid response. Try again shortly.'})
-        return 502
+        return 502, {'error': 'Redmine is unavailable or returned an invalid response. Try again shortly.'}
 
 
-def _get(base, token, path):
-    credentials = base64.b64encode(f'apikey:{token}'.encode()).decode()
+def _get(base, api_key, path):
     request = Request(base + path, headers={
-        'Accept': 'application/hal+json, application/json',
-        'Authorization': f'Basic {credentials}',
+        'Accept': 'application/json',
+        'X-Redmine-API-Key': api_key,
         'User-Agent': 'StormPilot/1.0',
     })
-    with urlopen(request, timeout=5) as response:
-        return json.loads(response.read())
+    # Never forward the credential header to a redirect target on another host.
+    with build_opener(_NoRedirect).open(request, timeout=5) as response:
+        payload = json.loads(response.read())
+    if not isinstance(payload, dict):
+        raise ValueError('Redmine returned an unexpected response')
+    return payload
 
 
-def _elements(payload):
-    return payload.get('_embedded', {}).get('elements', [])
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
-def _count(payload, rows):
-    return payload.get('total', len(rows))
+def _elements(payload, key):
+    rows = payload.get(key, [])
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
 def _project(item, base):
+    identifier = item.get('identifier') or item.get('id')
     return {
         'id': item.get('id'), 'name': item.get('name', 'Untitled project'),
-        'description': _plain(item.get('description')),
-        'status': _plain(item.get('status') or item.get('_links', {}).get('status', {}).get('title')),
-        'url': f"{base}/projects/{item.get('identifier') or item.get('id')}",
+        'description': item.get('description', ''), 'url': f'{base}/projects/{identifier}',
     }
 
 
-def _work_package(item, base):
-    links = item.get('_links', {})
+def _issue(item, base):
     return {
-        'id': item.get('id'), 'subject': item.get('subject', 'Untitled work package'),
-        'type': _plain(links.get('type', {}).get('title')),
-        'status': _plain(links.get('status', {}).get('title')),
-        'priority': _plain(links.get('priority', {}).get('title')),
-        'assignee': _plain(links.get('assignee', {}).get('title')),
-        'project': _plain(links.get('project', {}).get('title')),
-        'updated_at': item.get('updatedAt', ''),
-        'url': f"{base}/work_packages/{item.get('id')}",
+        'id': item.get('id'), 'subject': item.get('subject', 'Untitled issue'),
+        'tracker': _name(item.get('tracker')), 'status': _name(item.get('status')),
+        'priority': _name(item.get('priority')), 'assignee': _name(item.get('assigned_to')),
+        'project': _name(item.get('project')), 'updated_on': item.get('updated_on', ''),
+        'url': f"{base}/issues/{item.get('id')}",
     }
 
 
-def _plain(value):
-    if isinstance(value, dict):
-        return value.get('raw', '')
-    return value or ''
-
-
-def _send(handler, status, payload):
-    content = json.dumps(payload).encode()
-    handler.send_response(status)
-    handler.send_header('Content-Type', 'application/json')
-    handler.send_header('Cache-Control', 'no-store')
-    handler.send_header('Content-Length', str(len(content)))
-    handler.end_headers()
-    handler.wfile.write(content)
+def _name(value):
+    return value.get('name', '') if isinstance(value, dict) else ''

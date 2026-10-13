@@ -7,9 +7,9 @@ run:
 smoke:
 	python3 scripts/smoke.py
 up:
-	docker compose up --build -d --wait --wait-timeout 120
+	docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120
 down:
-	docker compose down -v
+	docker compose -f compose.yaml -f compose.dev.yaml down -v
 kind-up:
 	kind create cluster --name stormpilot
 	docker build -t stormpilot:local .

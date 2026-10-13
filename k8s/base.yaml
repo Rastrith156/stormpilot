@@ -32,13 +32,13 @@ spec:
           image: stormpilot:local
           imagePullPolicy: IfNotPresent
           env:
-            - name: OPENPROJECT_URL
+            - name: REDMINE_URL
               value: ""
-            - name: OPENPROJECT_API_TOKEN
+            - name: REDMINE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openproject-credentials
-                  key: api-token
+                  name: redmine-credentials
+                  key: api-key
                   optional: true
           ports:
             - {name: http, containerPort: 8080}

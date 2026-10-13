@@ -23,11 +23,11 @@ function escapeHtml(value = '') {
 async function loadWorkspace() {
   $('#refresh').disabled = true;
   try {
-    const response = await fetch('/api/openproject', { cache: 'no-store' });
+    const response = await fetch('/api/redmine', { cache: 'no-store' });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'OpenProject is unavailable.');
+    if (!response.ok) throw new Error(data.error || 'Redmine is unavailable.');
     if (!data.configured) {
-      showState('Connect your OpenProject instance', data.message || 'Set OPENPROJECT_URL and OPENPROJECT_API_TOKEN in the server environment, then restart StormPilot. The token remains on the server.');
+      showState('Connect your Redmine instance', data.message || 'Set REDMINE_URL and REDMINE_API_KEY in the server environment, then restart StormPilot. The API key remains on the server.');
       $('#last-updated').textContent = 'Not configured';
       return;
     }
@@ -35,16 +35,16 @@ async function loadWorkspace() {
     $('#instance-link').hidden = false;
     $('#instance-host').textContent = new URL(data.instance_url).host;
     $('#project-count').textContent = Number(data.counts.projects || 0).toLocaleString();
-    $('#work-count').textContent = Number(data.counts.work_packages || 0).toLocaleString();
+    $('#issues-count').textContent = Number(data.counts.issues || 0).toLocaleString();
     $('#project-total').textContent = data.projects.length;
-    $('#work-total').textContent = data.work_packages.length;
-    $('#projects').innerHTML = data.projects.length ? data.projects.map(project => `<a class="project-row" href="${escapeHtml(safeUrl(project.url))}" target="_blank" rel="noopener noreferrer"><span class="project-mark" aria-hidden="true">${escapeHtml((project.name || 'P').slice(0, 1).toUpperCase())}</span><span class="row-main"><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.description || 'No description')}</small></span><span class="row-status">${escapeHtml(project.status || 'Project')}</span><span class="arrow" aria-hidden="true">↗</span></a>`).join('') : '<div class="empty">No projects are visible to this OpenProject account.</div>';
-    $('#work-packages').innerHTML = data.work_packages.length ? data.work_packages.map(item => `<a class="work-row" href="${escapeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer"><span class="work-id">#${escapeHtml(item.id)}</span><span class="row-main"><strong>${escapeHtml(item.subject)}</strong><small>${escapeHtml([item.project, item.type, item.assignee].filter(Boolean).join(' · ') || 'Work package')}</small></span><span class="work-status">${escapeHtml(item.status || 'Open')}</span></a>`).join('') : '<div class="empty">No work packages are visible in this instance.</div>';
+    $('#issues-total').textContent = data.issues.length;
+    $('#projects').innerHTML = data.projects.length ? data.projects.map(project => `<a class="project-row" href="${escapeHtml(safeUrl(project.url))}" target="_blank" rel="noopener noreferrer"><span class="project-mark" aria-hidden="true">${escapeHtml((project.name || 'P').slice(0, 1).toUpperCase())}</span><span class="row-main"><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.description || 'No description')}</small></span><span class="row-status">Project</span><span class="arrow" aria-hidden="true">↗</span></a>`).join('') : '<div class="empty">No projects are visible to this Redmine account.</div>';
+    $('#issues').innerHTML = data.issues.length ? data.issues.map(item => `<a class="work-row" href="${escapeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer"><span class="work-id">#${escapeHtml(item.id)}</span><span class="row-main"><strong>${escapeHtml(item.subject)}</strong><small>${escapeHtml([item.project, item.tracker, item.assignee].filter(Boolean).join(' · ') || 'Issue')}</small></span><span class="work-status">${escapeHtml(item.status || 'Open')}</span></a>`).join('') : '<div class="empty">No open issues are visible in this instance.</div>';
     state.hidden = true;
     $('#workspace-data').hidden = false;
     $('#last-updated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   } catch (error) {
-    showState('Could not reach OpenProject', error.message || 'Check the server configuration and try again.', 'error');
+    showState('Could not reach Redmine', error.message || 'Check the server configuration and try again.', 'error');
     $('#last-updated').textContent = 'Connection issue';
   } finally {
     $('#refresh').disabled = false;
