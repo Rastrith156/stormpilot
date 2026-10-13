@@ -47,6 +47,7 @@
     const geoStatus = document.getElementById('geoStatus');
     const trackButton = document.getElementById('trackButton');
     let watchId = null;
+    let deviceToken = null;
 
     function setStatus(message, type = 'info') {
       geoStatus.className = 'status-block ' + type;
@@ -69,22 +70,55 @@
 
       fetch('/api/device/telemetry', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${deviceToken}`},
         body: JSON.stringify(payload)
       })
         .then(async response => {
           const data = await response.json();
-          if (!response.ok) throw new Error(data.error || 'Telemetry rejected');
+          if (!response.ok) {
+            if (response.status === 401) {
+              deviceToken = null;
+              sessionStorage.removeItem(`stormpilot:${payload.drone_id}:${payload.device_id}`);
+              if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+              watchId = null;
+              trackButton.disabled = false;
+            }
+            throw new Error(data.error || 'Telemetry rejected');
+          }
           setStatus(`Telemetry accepted for ${payload.drone_id}.`, 'success');
         })
         .catch(error => setStatus(error.message, 'error'));
     }
 
-    connectForm.addEventListener('submit', function (event) {
+    connectForm.addEventListener('submit', async function (event) {
       event.preventDefault();
       if (!navigator.geolocation) {
         setStatus('Geolocation is unavailable in this browser.', 'error');
         return;
+      }
+
+      const deviceId = document.getElementById('deviceId').value.trim();
+      const droneId = document.getElementById('droneId').value;
+      const tokenKey = `stormpilot:${droneId}:${deviceId}`;
+      deviceToken = sessionStorage.getItem(tokenKey);
+      if (!deviceToken) {
+        setStatus('Registering this device...', 'info');
+        trackButton.disabled = true;
+        try {
+          const response = await fetch('/api/device/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({device_id: deviceId, drone_id: droneId})
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Device registration failed');
+          deviceToken = data.token;
+          sessionStorage.setItem(tokenKey, deviceToken);
+        } catch (error) {
+          setStatus(error.message, 'error');
+          trackButton.disabled = false;
+          return;
+        }
       }
 
       if (watchId !== null) {

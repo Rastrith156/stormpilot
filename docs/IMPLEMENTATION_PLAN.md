@@ -1,10 +1,12 @@
 ﻿# Implementation plan
 
-## Milestone 1: Foundation and tests
+## Milestone 1: Foundation and durable state (completed in this iteration)
 
-- Keep the existing HTTP server and Redmine proxy intact.
-- Add fleet regression tests for demo drones, telemetry validation, idempotent confirmation, and SMTP warnings.
-- Confirm the tests fail before implementing the new path.
+- Kept the existing HTTP server and Redmine proxy intact.
+- Added a SQLite-backed persistence layer for drone registrations, telemetry samples, delivery records, event history, and notification outbox state.
+- Added database initialization and migration-style bootstrapping with explicit table creation and indexes.
+- Preserved the existing fleet, config, DNS/Redmine, and health endpoints while adding safe server-side validation for GPS samples and delivery confirmation.
+- Added milestone tests for database initialization, delivery state transitions, and idempotent confirmation.
 
 ## Milestone 2: Fleet backend
 

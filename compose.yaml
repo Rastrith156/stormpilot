@@ -7,9 +7,34 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     environment:
+      APP_DATA_DIR: /data
       REDMINE_URL: ${REDMINE_URL:-}
       REDMINE_API_KEY: ${REDMINE_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD:-}
+      DELIVERY_NOTIFICATION_TO: ${DELIVERY_NOTIFICATION_TO:-}
+      ARRIVAL_GEOFENCE_RADIUS_M: ${ARRIVAL_GEOFENCE_RADIUS_M:-50}
+    volumes: [stormpilot-data:/data]
     networks: [default, edge]
+  notification-worker:
+    build: .
+    command: ["python", "-m", "app.notification_worker"]
+    read_only: true
+    tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    environment:
+      APP_DATA_DIR: /data
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD:-}
+      DELIVERY_NOTIFICATION_TO: ${DELIVERY_NOTIFICATION_TO:-}
+    volumes: [stormpilot-data:/data]
+    networks: [default]
   prometheus:
     image: prom/prometheus:v3.2.1
     ports: ["127.0.0.1:9090:9090"]
@@ -36,5 +61,6 @@ networks:
         - subnet: ${DOCKER_PRIVATE_SUBNET:-172.30.80.0/24}
 
 volumes:
+  stormpilot-data:
   prometheus-data:
   grafana-data:
