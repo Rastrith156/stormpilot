@@ -231,6 +231,57 @@ def initialize_storage(force_reset=False):
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 '''
+            ),
+            (
+                4,
+                '004_admin_identity_sessions_and_simulation',
+                '''
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    password_salt TEXT NOT NULL,
+                    password_iterations INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'OPERATOR', 'VIEWER')),
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    password_changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    session_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    csrf_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    last_seen_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES admin_users(user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id, expires_at);
+
+                CREATE TABLE IF NOT EXISTS admin_login_attempts (
+                    username_key TEXT PRIMARY KEY,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    window_started_at TEXT NOT NULL,
+                    locked_until TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS simulation_runs (
+                    scenario_id TEXT PRIMARY KEY,
+                    scenario_type TEXT NOT NULL,
+                    input_json TEXT NOT NULL,
+                    baseline_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'SIMULATED' CHECK (origin = 'SIMULATED'),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    applied_at TEXT,
+                    FOREIGN KEY(created_by) REFERENCES admin_users(user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_simulation_runs_created ON simulation_runs(created_at);
+                '''
             )
         ]
 

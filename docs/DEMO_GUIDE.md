@@ -1,40 +1,37 @@
-﻿# Demo guide
+# StormPilot operational demo
 
-## Local demo
+## Start locally
 
-```bash
-python -m unittest discover -s tests -v
-```
-
-For a local PowerShell session, set `HOST`, `PORT`, a random `STORMPILOT_ADMIN_TOKEN`, and optionally `GOOGLE_MAPS_API_KEY`, then run:
+Use PowerShell and a data directory separate from any existing tracked/local database. Choose a free port; do not stop an existing service to claim 8080.
 
 ```powershell
 $env:HOST = "127.0.0.1"
 $env:PORT = "8081"
-$env:STORMPILOT_ADMIN_TOKEN = "<random-secret>"
-$env:GOOGLE_MAPS_API_KEY = "<browser-restricted-key-or-empty>"
-python app/server.py
+$env:APP_DATA_DIR = ".\.stormpilot_m4_data"
+$env:STORMPILOT_COOKIE_SECURE = "false"
+$env:GOOGLE_MAPS_API_KEY = "<optional browser-restricted key>"
+& .\.venv\Scripts\python.exe -m app.admin bootstrap --username opsadmin
+& .\.venv\Scripts\python.exe app/server.py
 ```
 
-Use an unoccupied port; 8080 may already be in use by Compose. Then open:
+Open `http://127.0.0.1:8081/ui`. Bootstrap prompts for the first password twice and refuses to run when an administrator account already exists.
 
-- http://127.0.0.1:8081/ui
-- http://127.0.0.1:8081/drone/connect
+## Operator walkthrough
 
-## Scenario
+1. Sign in on the dashboard with an individual account. The session cookie is HTTP-only; mutations mirror the CSRF cookie through `X-CSRF-Token`. Use ADMIN/OPERATOR accounts only for the operations they are permitted to perform.
+2. Review four stable drones. New/no-phone identities remain OFFLINE; accepted phone GPS is shown as `PHONE_GPS`; stale positions are explicitly stale, not current.
+3. Open `/drone/connect` in the phone browser. An ADMIN dashboard session is required for new enrollment. Existing device bearer tokens continue to authorize only their bound phone telemetry. Grant geolocation permission to send actual phone GPS.
+4. Compare current, nearest-eligible and optimized assignment strategies. Review deadline, nominal-range, zone/corridor constraints and estimates. Only select the explicit approval action when prepared to apply a proposal to eligible persisted `CREATED` deliveries.
+5. Run a what-if case, inspect its baseline and proposed plan, affected IDs, warnings and rationale. Repeat from scenario history to replay the persisted deterministic result. Scenario changes remain isolated until an eligible proposal is explicitly approved.
+6. Use route replay to select a drone or delivery and a bounded time window. Step, play, pause and adjust speed; export the JSON report. Gaps represent absent GPS samples, not interpolated points.
+7. Inspect traffic origin and filters, and optionally enable virtual twin overlays. Live/historical observations and `SIMULATED` virtual objects are distinct datasets.
+8. Delivery handover remains server-authoritative and requires recorded arrival evidence. Replay and hypothetical execution cannot complete deliveries or send notifications.
 
-1. Ask an administrator for the enrollment token through a secure channel.
-2. Open the drone connect page, choose an identity and device ID, and enter the admin token for first-time registration.
-3. Grant browser geolocation permission; only accepted phone GPS is drawn as an observed position.
-4. Inspect `PHONE_GPS`, `STALE` and `OFFLINE` states, selected-drone accuracy/distance, traffic cells and delivery records on the fleet dashboard.
-5. Complete delivery handover only after backend geofence evidence has moved the delivery to `ARRIVED`; the handover API also requires the administrator token.
-6. Toggle the digital-twin layer to show simulated routes/zones. These are demonstrations, not official airspace restrictions or flight-safety guidance.
+## Honest constraints
 
-## Demo notes
-
-- Four drone identities are seeded immediately; drones without phone GPS are `OFFLINE` and have no fabricated coordinates.
-- Without a Google Maps key, the fleet APIs and dashboard data remain available with an explicit map configuration state.
-- Configure a browser-restricted Maps key with the Maps JavaScript API restriction. Development and production referrers, quotas and possible billing are documented in the README.
-- The administrator token is server-configured and is not embedded or persisted by the browser page.
-- SMTP warnings appear clearly when Gmail credentials are not configured.
-- No real drone control or physical aircraft integration is claimed. Virtual zones are not official aviation restrictions.
+- If Maps is not configured, login, fleet data, optimizer, scenario and replay APIs remain usable with an explicit map fallback.
+- Google Maps key must be HTTP-referrer restricted and API restricted to Maps JavaScript API. Development origins should be limited to the actual local ports; production must allow only the deployed HTTPS origin.
+- Google Maps billing may apply beyond applicable free allowances. Configure project quotas and budgets. StormPilot does not request Google Routes for each GPS update.
+- Optimizer estimates use nominal operator-configured range/speed and straight-line repositioning, not battery/flight telemetry or a safe physical route. The deterministic heuristic is not AI.
+- Virtual routes/zones are not official aviation restrictions. No physical flight-control command is implemented.
+- Run tests and smoke checks against isolated data. Do not restart Docker Desktop or existing containers for ordinary verification.

@@ -125,6 +125,104 @@
         <p id="twinWarning" class="muted-copy">Virtual routes, corridors and zones are not official aviation restrictions or flight-safety guidance.</p>
         <div id="twinSummary" class="traffic-summary"></div>
       </section>
+
+      <section class="panel workbench-panel" aria-labelledby="authHeading">
+        <div class="panel-header">
+          <div><p class="eyebrow">SECURE OPERATIONS</p><h2 id="authHeading">Administrator and operator access</h2></div>
+          <span id="authRole" class="pill neutral">Signed out</span>
+        </div>
+        <form id="loginForm" class="workbench-form">
+          <label>Username <input id="loginUsername" name="username" autocomplete="username" required maxlength="64"></label>
+          <label>Password <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          <button class="button primary" type="submit">Sign in</button>
+        </form>
+        <div class="inline-actions">
+          <button id="logoutButton" class="button secondary" type="button" hidden>Sign out</button>
+          <span id="authMessage" class="muted-copy" role="status">Sign in to access administration, planning, scenarios and replay.</span>
+        </div>
+      </section>
+
+      <section id="userManagement" class="panel workbench-panel" hidden>
+        <div class="panel-header"><h2>Administration · user management</h2><span class="pill neutral">ADMIN only</span></div>
+        <form id="userCreateForm" class="workbench-form">
+          <label>Username <input id="newUsername" required minlength="3" maxlength="64" autocomplete="off"></label>
+          <label>Temporary password <input id="newPassword" type="password" required minlength="12" maxlength="1024" autocomplete="new-password"></label>
+          <label>Role <select id="newRole"><option>VIEWER</option><option>OPERATOR</option><option>ADMIN</option></select></label>
+          <button class="button primary" type="submit">Create account</button>
+        </form>
+        <div id="userMessage" class="status-block" role="status" hidden></div>
+        <div id="userList" class="user-list" aria-live="polite"></div>
+      </section>
+
+      <section class="panel workbench-panel">
+        <div class="panel-header"><div><p class="eyebrow">DETERMINISTIC HEURISTIC</p><h2>Mission optimization</h2></div><span class="pill neutral">Approval required</span></div>
+        <p class="muted-copy">Compares persisted assignments, nearest eligible drone and deterministic optimized assignment. Range and direct-segment zone checks are estimates, not safe flight routing.</p>
+        <div class="inline-actions">
+          <button id="optimizeButton" class="button primary" type="button">Compare assignment strategies</button>
+          <button id="applyOptimizationButton" class="button secondary" type="button" hidden>Approve and apply recommendation</button>
+        </div>
+        <div id="optimizerMessage" class="status-block" role="status">Sign in as ADMIN or OPERATOR to request a plan.</div>
+        <div id="optimizerResults" class="traffic-summary" aria-live="polite"></div>
+      </section>
+
+      <section class="panel workbench-panel">
+        <div class="panel-header"><div><p class="eyebrow">ISOLATED SNAPSHOT</p><h2>What-if scenarios</h2></div><span class="pill warning">SIMULATED</span></div>
+        <form id="scenarioForm" class="workbench-form">
+          <label>Scenario
+            <select id="scenarioType">
+              <option value="drone_offline">Drone goes offline</option>
+              <option value="deadline_missed">Delivery deadline missed</option>
+              <option value="corridor_unavailable">Virtual corridor unavailable</option>
+              <option value="range_limit">Drone approaches range limit</option>
+              <option value="shared_corridor">Two drones approach shared corridor</option>
+              <option value="mission_infeasible">Mission becomes infeasible</option>
+              <option value="high_priority_delivery">New high-priority delivery</option>
+            </select>
+          </label>
+          <label class="scenario-field" data-scenario-fields="drone_offline range_limit">Drone <select id="scenarioDrone"></select></label>
+          <label class="scenario-field" data-scenario-fields="deadline_missed mission_infeasible">Delivery <select id="scenarioDelivery"></select></label>
+          <label class="scenario-field" data-scenario-fields="deadline_missed">Hypothetical missed deadline <input id="scenarioDeadline" type="datetime-local"></label>
+          <label class="scenario-field" data-scenario-fields="corridor_unavailable">Virtual corridor <select id="scenarioCorridor"></select></label>
+          <label class="scenario-field" data-scenario-fields="range_limit">Remaining range budget (km) <input id="scenarioRange" type="number" min="0.01" step="0.1" value="1"></label>
+          <label class="scenario-field" data-scenario-fields="mission_infeasible">Hypothetical constraint reason <input id="scenarioReason" maxlength="200" value="Scenario-only mission infeasibility"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Hypothetical delivery ID <input id="hypotheticalDelivery" maxlength="64"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Pickup latitude <input id="hypotheticalPickupLat" type="number" min="-90" max="90" step="any"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Pickup longitude <input id="hypotheticalPickupLng" type="number" min="-180" max="180" step="any"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Destination latitude <input id="hypotheticalDestinationLat" type="number" min="-90" max="90" step="any"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Destination longitude <input id="hypotheticalDestinationLng" type="number" min="-180" max="180" step="any"></label>
+          <label class="scenario-field" data-scenario-fields="high_priority_delivery">Planned route distance (km) <input id="hypotheticalRouteKm" type="number" min="0.01" step="0.1"></label>
+          <button class="button primary" type="submit">Run isolated scenario</button>
+        </form>
+        <div id="scenarioMessage" class="status-block" role="status">Sign in as ADMIN or OPERATOR to run a deterministic simulation.</div>
+        <div id="scenarioResult" class="traffic-summary" aria-live="polite"></div>
+        <div class="panel-header subpanel-header"><h3>Scenario history</h3><button id="refreshScenarios" class="button secondary" type="button">Refresh history</button></div>
+        <div id="scenarioHistory" class="traffic-summary"></div>
+      </section>
+
+      <section class="panel workbench-panel">
+        <div class="panel-header"><div><p class="eyebrow">READ-ONLY FORENSICS</p><h2>Route replay</h2></div><span class="pill neutral">Accepted GPS only</span></div>
+        <form id="replayForm" class="workbench-form">
+          <label>Replay by <select id="replayTarget"><option value="drone">Drone</option><option value="delivery">Delivery</option></select></label>
+          <label id="replayDroneField">Drone <select id="replayDrone"></select></label>
+          <label id="replayDeliveryField" hidden>Delivery <select id="replayDelivery"></select></label>
+          <label>From <input id="replayFrom" type="datetime-local" required></label>
+          <label>To <input id="replayTo" type="datetime-local" required></label>
+          <button class="button primary" type="submit">Load bounded replay</button>
+        </form>
+        <div id="replayMessage" class="status-block" role="status">Sign in to query up to 2,000 recorded GPS points and 500 events.</div>
+        <div class="inline-actions replay-controls">
+          <button id="replayPlay" class="button secondary" type="button" disabled>Play</button>
+          <button id="replayPause" class="button secondary" type="button" disabled>Pause</button>
+          <button id="replayBack" class="button secondary" type="button" disabled>Step back</button>
+          <button id="replayForward" class="button secondary" type="button" disabled>Step forward</button>
+          <label>Speed <select id="replaySpeed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+          <button id="replayReport" class="button secondary" type="button" disabled>Export mission report</button>
+        </div>
+        <div id="replayPosition" class="muted-copy" aria-live="polite">No replay loaded.</div>
+        <div id="replayTimeline" class="replay-timeline" aria-label="Replay progress"></div>
+        <div id="replayEvents" class="traffic-summary"></div>
+        <p class="muted-copy">Missing samples stay gaps; StormPilot never fabricates coordinates or interpolates a flight path. Replay has no delivery or notification controls.</p>
+      </section>
     </main>
   </div>
 

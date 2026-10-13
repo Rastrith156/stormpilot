@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -10,13 +10,13 @@
   <main class="connect-shell">
     <section class="connect-card">
       <p class="eyebrow">PHONE TRACKING / AUTHORIZATION</p>
-      <h1>Register a demo drone</h1>
-      <p class="lead">Use a registered phone to send GPS telemetry to the backend.</p>
+      <h1>Connect a demo drone</h1>
+      <p class="lead">Use a registered phone to send GPS telemetry to the backend. New device enrollment requires a signed-in administrator; administrator passwords are never entered on this page.</p>
 
       <form id="connectForm" class="connect-form">
         <label>
           Device ID
-          <input type="text" id="deviceId" value="device-1" required>
+          <input type="text" id="deviceId" value="device-1" required maxlength="64" autocomplete="off">
         </label>
         <label>
           Drone ID
@@ -27,22 +27,18 @@
             <option>SP-DRONE-04</option>
           </select>
         </label>
-        <label>
-          Administrator enrollment token
-          <input type="password" id="adminToken" autocomplete="off" spellcheck="false">
-        </label>
-        <p class="help-copy">Required only when enrolling a new device. This server-issued administrator credential is sent over HTTPS to authorize registration and is never saved in this page.</p>
         <button id="trackButton" class="button primary" type="submit">Start tracking</button>
       </form>
 
-      <div id="geoStatus" class="status-block">Awaiting geolocation permission.</div>
+      <div id="authStatus" class="status-block warning" role="status">Checking administrator session.</div>
+      <div id="geoStatus" class="status-block" role="status">Awaiting geolocation permission.</div>
       <div class="telemetry-summary">
         <div><strong id="latValue">—</strong><span>Latitude</span></div>
         <div><strong id="lngValue">—</strong><span>Longitude</span></div>
         <div><strong id="accuracyValue">—</strong><span>Accuracy</span></div>
       </div>
       <div class="inline-actions">
-        <a class="button secondary" href="/ui">Open fleet map</a>
+        <a class="button secondary" href="/ui">Open fleet dashboard / sign in</a>
       </div>
     </section>
   </main>
@@ -53,13 +49,21 @@
     const trackButton = document.getElementById('trackButton');
     let watchId = null;
     let deviceToken = null;
+    let sendInFlight = false;
 
     function setStatus(message, type = 'info') {
-      geoStatus.className = 'status-block ' + type;
+      geoStatus.className = `status-block ${type}`;
       geoStatus.textContent = message;
     }
 
-    function sendTelemetry(position) {
+    function csrfToken() {
+      const entry = document.cookie.split('; ').find(value => value.startsWith('stormpilot_csrf='));
+      return entry ? decodeURIComponent(entry.slice('stormpilot_csrf='.length)) : '';
+    }
+
+    async function sendTelemetry(position) {
+      if (sendInFlight || !deviceToken) return;
+      sendInFlight = true;
       const payload = {
         device_id: document.getElementById('deviceId').value.trim(),
         drone_id: document.getElementById('droneId').value,
@@ -68,77 +72,73 @@
         accuracy: position.coords.accuracy,
         timestamp: new Date(position.timestamp).toISOString()
       };
-
       document.getElementById('latValue').textContent = payload.lat.toFixed(5);
       document.getElementById('lngValue').textContent = payload.lng.toFixed(5);
       document.getElementById('accuracyValue').textContent = `${Math.round(payload.accuracy)} m`;
 
-      fetch('/api/device/telemetry', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${deviceToken}`},
-        body: JSON.stringify(payload)
-      })
-        .then(async response => {
-          const data = await response.json();
-          if (!response.ok) {
-            if (response.status === 401) {
-              deviceToken = null;
-              sessionStorage.removeItem(`stormpilot:${payload.drone_id}:${payload.device_id}`);
-              if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-              watchId = null;
-              trackButton.disabled = false;
-            }
-            throw new Error(data.error || 'Telemetry rejected');
+      try {
+        const response = await fetch('/api/device/telemetry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${deviceToken}`},
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          if (response.status === 401) {
+            deviceToken = null;
+            sessionStorage.removeItem(`stormpilot:${payload.drone_id}:${payload.device_id}`);
+            if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+            watchId = null;
+            trackButton.disabled = false;
+            trackButton.textContent = 'Start tracking';
           }
-          setStatus(`Telemetry accepted for ${payload.drone_id}.`, 'success');
-        })
-        .catch(error => setStatus(error.message, 'error'));
+          throw new Error(data.error || 'Telemetry rejected');
+        }
+        setStatus(`Telemetry accepted for ${payload.drone_id}.`, 'success');
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : 'Telemetry request failed.', 'error');
+      } finally {
+        sendInFlight = false;
+      }
     }
 
-    connectForm.addEventListener('submit', async function (event) {
+    connectForm.addEventListener('submit', async event => {
       event.preventDefault();
       if (!navigator.geolocation) {
         setStatus('Geolocation is unavailable in this browser.', 'error');
         return;
       }
-
       const deviceId = document.getElementById('deviceId').value.trim();
       const droneId = document.getElementById('droneId').value;
       const tokenKey = `stormpilot:${droneId}:${deviceId}`;
       deviceToken = sessionStorage.getItem(tokenKey);
       if (!deviceToken) {
-        const adminToken = document.getElementById('adminToken').value.trim();
-        if (!adminToken) {
-          setStatus('An administrator enrollment token is required to register a new device.', 'error');
+        const csrf = csrfToken();
+        if (!csrf) {
+          setStatus('New enrollment requires an ADMIN session. Sign in on the fleet dashboard and return here.', 'error');
           return;
         }
-        setStatus('Registering this device...', 'info');
+        setStatus('Requesting server-authorized device enrollment…');
         trackButton.disabled = true;
         try {
           const response = await fetch('/api/device/register', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${adminToken}`
-            },
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
             body: JSON.stringify({device_id: deviceId, drone_id: droneId})
           });
           const data = await response.json();
-          if (!response.ok) throw new Error(data.error || 'Device registration failed');
+          if (!response.ok) throw new Error(data.error || `Device enrollment failed (${response.status}).`);
           deviceToken = data.token;
           sessionStorage.setItem(tokenKey, deviceToken);
         } catch (error) {
-          setStatus(error.message, 'error');
+          setStatus(error instanceof Error ? error.message : 'Device enrollment failed.', 'error');
           trackButton.disabled = false;
           return;
         }
       }
-
-      if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
-      }
-
-      setStatus('Requesting geolocation permission...', 'info');
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      setStatus('Requesting geolocation permission…');
       trackButton.disabled = true;
       watchId = navigator.geolocation.watchPosition(
         position => {
@@ -154,9 +154,24 @@
           setStatus(message, 'error');
           trackButton.disabled = false;
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+        {enableHighAccuracy: true, timeout: 10000, maximumAge: 5000}
       );
     });
+
+    fetch('/api/auth/session', {credentials: 'same-origin', cache: 'no-store'})
+      .then(async response => {
+        const payload = await response.json();
+        const status = document.getElementById('authStatus');
+        if (response.ok) {
+          status.className = 'status-block success';
+          status.textContent = `Signed in as ${payload.user.username} (${payload.user.role}). ADMIN is required for new enrollment; saved device credentials independently authorize phone GPS.`;
+        } else {
+          status.textContent = 'Not signed in. Open the fleet dashboard and sign in as an administrator before enrolling a new device.';
+        }
+      })
+      .catch(() => {
+        document.getElementById('authStatus').textContent = 'Administrator session status is unavailable. Existing device telemetry can still be used.';
+      });
   </script>
 </body>
 </html>

@@ -22,7 +22,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         if path.startswith('/api/'):
-            status, payload = api.handle('GET', path, query=parsed_url.query)
+            request_headers = dict(self.headers.items())
+            request_headers['X-Client-IP'] = self.client_address[0]
+            status, payload = api.handle('GET', path, headers=request_headers, query=parsed_url.query)
             self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
@@ -85,9 +87,11 @@ class Handler(BaseHTTPRequestHandler):
             parsed_url = urlparse(self.path)
             content_length = int(self.headers.get('Content-Length', '0'))
             body = self.rfile.read(content_length) if content_length > 0 else b''
+            request_headers = dict(self.headers.items())
+            request_headers['X-Client-IP'] = self.client_address[0]
             status, payload = api.handle(
                 method, path, body,
-                headers=dict(self.headers.items()),
+                headers=request_headers,
                 query=parsed_url.query,
             )
             self._send_json(status, payload)
@@ -102,12 +106,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _send_json(self, status, body):
+        response_headers = body.pop('_response_headers', []) if isinstance(body, dict) else []
         payload = json.dumps(body).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Length', str(len(payload)))
+        for name, value in response_headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 

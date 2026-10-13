@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 from app import api
 from app import db as store
 from app.server import Handler
+from support import create_authenticated_user
 
 
 class MilestoneTwoSecurityTests(unittest.TestCase):
@@ -32,25 +33,25 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix='stormpilot_m2_')
         self.original_data_dir = os.environ.get('APP_DATA_DIR')
-        self.original_admin_token = os.environ.get('STORMPILOT_ADMIN_TOKEN')
+        self.original_cookie_secure = os.environ.get('STORMPILOT_COOKIE_SECURE')
         os.environ['APP_DATA_DIR'] = self.temp_dir
-        os.environ['STORMPILOT_ADMIN_TOKEN'] = 'milestone-three-test-admin-token-for-tests'
+        os.environ['STORMPILOT_COOKIE_SECURE'] = 'false'
         api.initialize_storage(force_reset=True)
+        self.session_headers = create_authenticated_user()
 
     def tearDown(self):
         if self.original_data_dir is None:
             os.environ.pop('APP_DATA_DIR', None)
         else:
             os.environ['APP_DATA_DIR'] = self.original_data_dir
-        if self.original_admin_token is None:
-            os.environ.pop('STORMPILOT_ADMIN_TOKEN', None)
+        if self.original_cookie_secure is None:
+            os.environ.pop('STORMPILOT_COOKIE_SECURE', None)
         else:
-            os.environ['STORMPILOT_ADMIN_TOKEN'] = self.original_admin_token
+            os.environ['STORMPILOT_COOKIE_SECURE'] = self.original_cookie_secure
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    @staticmethod
-    def admin_headers():
-        return {'Authorization': 'Bearer milestone-three-test-admin-token-for-tests'}
+    def admin_headers(self):
+        return self.session_headers.copy()
 
     def request(self, method, path, payload=None, headers=None):
         data = None if payload is None else json.dumps(payload).encode()

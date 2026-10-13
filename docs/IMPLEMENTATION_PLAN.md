@@ -1,33 +1,48 @@
-﻿# Implementation plan
+# Implementation plan
 
-## Milestone 1: Foundation and durable state (completed in this iteration)
+## Completed foundations
 
-- Kept the existing HTTP server and Redmine proxy intact.
-- Added a SQLite-backed persistence layer for drone registrations, telemetry samples, delivery records, event history, and notification outbox state.
-- Added database initialization and migration-style bootstrapping with explicit table creation and indexes.
-- Preserved the existing fleet, config, DNS/Redmine, and health endpoints while adding safe server-side validation for GPS samples and delivery confirmation.
-- Added milestone tests for database initialization, delivery state transitions, and idempotent confirmation.
+- Preserved the original Redmine/reliability-lab endpoints and monitoring surfaces.
+- Added SQLite-backed fleet registrations, hashed device credentials, accepted/rejected telemetry, delivery lifecycle evidence and an idempotent email outbox.
+- Added four stable fleet identities, Google Maps with a no-key fallback, bounded traffic aggregates and a simulated digital-twin baseline.
 
-## Milestone 2: Fleet backend
+## Milestone 4: authenticated operational planning
 
-- Seed four demo drones with route, status, and mission metadata.
-- Add `/api/fleet` and `/api/config` responses.
-- Add `/api/device/telemetry` validation logic and safe state persistence.
-- Add `/api/delivery/confirm` with duplicate protection.
+### Individual administrator authentication
 
-## Milestone 3: Frontend and map experience
+- Migration 004 adds admin identities, session state, login throttling and simulation records without discarding existing fleet data.
+- PBKDF2 password hashes, opaque hashed sessions, HTTP-only SameSite cookies, CSRF validation, eight-hour expiry, revocation and role-based protected mutations replace the shared-token authorization path.
+- Roles are `ADMIN`, `OPERATOR` and `VIEWER`; the first ADMIN is created only by the one-time interactive CLI bootstrap.
+- Account creation, disabling, role change, credential rotation and privileged-action decisions are auditable without secret values.
+- Local HTTP requires the explicit `STORMPILOT_COOKIE_SECURE=false` setting; HTTPS deployments retain `true`.
 
-- Rebuild the main dashboard as a fleet operations interface.
-- Add a geolocation registration page for the four demo devices.
-- Use Google Maps when available and give a clear offline fallback when not.
+### Mission optimizer
 
-## Milestone 4: Operational polish
+- Compare current assignments, nearest eligible and deterministic greedy optimized assignments using persisted drones/deliveries and recent accepted phone GPS.
+- Report route, reposition and duration estimates; nominal range/deadline/virtual-zone/corridor constraints; unassigned reasons; workload and distance savings.
+- Preserve the proposal baseline and recheck live delivery state before explicit ADMIN/OPERATOR-approved changes to eligible `CREATED` assignments.
+- Limitations: no battery telemetry, road routing or physical flight-safety model; straight-line estimates are explicitly labelled. The deterministic heuristic is not AI.
 
-- Refresh docs and environment setup.
-- Support Gmail SMTP warnings and a verified test-email path.
-- Validate the CI test suite and local smoke checks.
+### What-if simulation
 
-## Milestone 5: Final verification
+- Capture baseline, scenario inputs and `SIMULATED` result snapshots without mutating live telemetry, delivery states or notifications.
+- Cover offline drone, missed deadline, unavailable virtual corridor, remaining range, shared-corridor approach, infeasible mission and hypothetical high-priority arrival.
+- Persist and replay the exact result; require explicit operator/admin approval before applying proposals for eligible persisted delivery rows. Hypothetical deliveries remain virtual.
 
-- Run the full project tests and ensure no regressions in the Redmine paths.
-- Record the exact working features and remaining limitations.
+### Route replay and forensics
+
+- Query one drone or delivery over a time range of at most 30 days; cap accepted GPS at 2,000 points and event history at 500.
+- Sort real accepted samples, identify long recording gaps, and never synthesize/interpolate coordinates.
+- Provide read-only step/playback controls and concise JSON incident-report export.
+
+## Upgrade / rollback
+
+1. Preserve the existing database and make a separate SQLite backup before applying migration 004.
+2. Apply the additive migration through normal application initialization; never delete or reset the existing database.
+3. Bootstrap the first named ADMIN with `python -m app.admin bootstrap --username <name>` and an interactively entered strong password. Shared-token environment variables do not authorize protected routes.
+4. Verify login, session/CSRF settings, roles, existing Redmine/device/delivery behavior, and backups before exposing the service.
+5. Rollback only by stopping the application and restoring the pre-migration backup. This removes migration-004 data and all subsequent writes.
+
+## Quality gates
+
+Run `python -m unittest discover -s tests -v`, JavaScript syntax checks, `python scripts/smoke.py --port <free-port>`, `git diff --check`, and `docker compose config --quiet`. Use isolated test data and an available port; do not stop Docker Desktop or existing containers for ordinary checks.

@@ -27,6 +27,9 @@ const mapState = {
   twinOverlays: [],
   twinSignature: null,
   heatCells: new Map(),
+  replayPath: null,
+  replayMarker: null,
+  replayPlannedPath: null,
   pollTimer: null,
   pollInFlight: false
 };
@@ -136,6 +139,7 @@ function renderFleet(drones) {
   fleetList.querySelectorAll('[data-drone-id]').forEach(button => {
     button.addEventListener('click', () => selectDrone(button.dataset.droneId));
   });
+  populateWorkbenchOptions();
   renderSelectedDrone();
 }
 
@@ -557,6 +561,7 @@ async function bootDashboard() {
     }
     mapState.twin = twin;
     renderTwin(twin);
+    populateWorkbenchOptions();
     renderMap();
   } catch (error) {
     twinSummary.textContent = `Virtual scenario data unavailable: ${error instanceof Error ? error.message : 'request failed'}`;
@@ -587,6 +592,522 @@ function loadGoogleMaps(apiKey) {
   };
   document.head.appendChild(script);
 }
+
+const workbench = {
+  user: null,
+  optimization: null,
+  scenario: null,
+  replay: null,
+  replayIndex: 0,
+  replayTimer: null
+};
+
+function csrfToken() {
+  const entry = document.cookie.split('; ').find(value => value.startsWith('stormpilot_csrf='));
+  return entry ? decodeURIComponent(entry.slice('stormpilot_csrf='.length)) : '';
+}
+
+async function apiRequest(path, method = 'GET', body) {
+  const headers = {'Content-Type': 'application/json'};
+  if (!['GET', 'HEAD'].includes(method)) {
+    const token = csrfToken();
+    if (token) headers['X-CSRF-Token'] = token;
+  }
+  const response = await fetch(path, {
+    method,
+    headers,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error('The server returned an invalid response.');
+  }
+  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
+  return payload;
+}
+
+function setWorkbenchMessage(id, message, type = '') {
+  const element = document.getElementById(id);
+  element.textContent = message;
+  element.className = `status-block ${type}`;
+}
+
+function populateSelect(id, items, selectedValue, emptyLabel) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const previous = selectedValue ?? select.value;
+  const options = items.map(item => `<option value="${escapeHTML(item.value)}">${escapeHTML(item.label)}</option>`).join('');
+  select.innerHTML = options || `<option value="">${escapeHTML(emptyLabel)}</option>`;
+  if (items.some(item => item.value === previous)) select.value = previous;
+}
+
+function populateWorkbenchOptions() {
+  const drones = mapState.fleet?.drones || [];
+  const deliveries = mapState.fleet?.deliveries || [];
+  populateSelect('scenarioDrone', drones.map(item => ({value: item.drone_id, label: item.drone_id})), null, 'No registered drones');
+  populateSelect('replayDrone', drones.map(item => ({value: item.drone_id, label: item.drone_id})), null, 'No registered drones');
+  populateSelect('replayDelivery', deliveries.map(item => ({value: item.delivery_id, label: `${item.delivery_id} · ${item.status}`})), null, 'No persisted deliveries');
+  populateSelect('scenarioDelivery', deliveries.map(item => ({value: item.delivery_id, label: `${item.delivery_id} · ${item.status}`})), null, 'No persisted deliveries');
+  populateSelect('scenarioCorridor', (mapState.twin?.corridors || []).map(item => ({value: item.id, label: item.name})), null, 'No virtual corridors');
+}
+
+function updateScenarioFields() {
+  const kind = document.getElementById('scenarioType').value;
+  document.querySelectorAll('[data-scenario-fields]').forEach(field => {
+    field.hidden = !field.dataset.scenarioFields.split(' ').includes(kind);
+  });
+}
+
+function setAuthState(user) {
+  workbench.user = user;
+  const form = document.getElementById('loginForm');
+  form.hidden = Boolean(user);
+  document.getElementById('logoutButton').hidden = !user;
+  document.getElementById('authRole').textContent = user ? `${user.username} · ${user.role}` : 'Signed out';
+  document.getElementById('authRole').className = `pill ${user ? 'success' : 'neutral'}`;
+  document.getElementById('userManagement').hidden = user?.role !== 'ADMIN';
+  const canPlan = ['ADMIN', 'OPERATOR'].includes(user?.role);
+  document.getElementById('optimizeButton').disabled = !canPlan;
+  document.getElementById('scenarioForm').querySelector('button[type="submit"]').disabled = !canPlan;
+  document.getElementById('replayForm').querySelector('button[type="submit"]').disabled = !user;
+  document.getElementById('refreshScenarios').disabled = !user;
+  setWorkbenchMessage('authMessage', user
+    ? `Signed in as ${user.username}. Role permissions are enforced by the server.`
+    : 'Sign in to access administration, planning, scenarios and replay.', user ? 'success' : '');
+  if (user?.role === 'ADMIN') refreshUsers();
+  if (user) {
+    refreshScenarioHistory();
+    setWorkbenchMessage('optimizerMessage', `Signed in as ${user.role}; request a deterministic plan.`, '');
+    setWorkbenchMessage('scenarioMessage', `Signed in as ${user.role}; scenarios are isolated and labelled SIMULATED.`, '');
+    setWorkbenchMessage('replayMessage', 'Select a drone and bounded time range to view accepted persisted GPS.', '');
+  } else {
+    document.getElementById('userList').replaceChildren();
+  }
+}
+
+async function refreshSession() {
+  try {
+    const payload = await apiRequest('/api/auth/session');
+    setAuthState(payload.user);
+  } catch {
+    setAuthState(null);
+  }
+}
+
+function showError(id, error) {
+  setWorkbenchMessage(id, error instanceof Error ? error.message : 'The request failed.', 'error');
+}
+
+function renderUsers(users) {
+  const list = document.getElementById('userList');
+  if (!users.length) {
+    list.textContent = 'No administrator accounts are available.';
+    return;
+  }
+  list.innerHTML = users.map(user => `
+    <form class="user-row" data-user-id="${escapeHTML(user.user_id)}">
+      <strong>${escapeHTML(user.username)}</strong>
+      <label>Role <select name="role">${['ADMIN', 'OPERATOR', 'VIEWER'].map(role => `<option ${role === user.role ? 'selected' : ''}>${role}</option>`).join('')}</select></label>
+      <label class="inline-check"><input name="enabled" type="checkbox" ${user.enabled ? 'checked' : ''}> Enabled</label>
+      <label>Rotate password <input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="Leave blank to keep"></label>
+      <button class="button secondary" type="submit">Save account</button>
+    </form>
+  `).join('');
+}
+
+async function refreshUsers() {
+  try {
+    const payload = await apiRequest('/api/admin/users');
+    renderUsers(payload.users);
+  } catch (error) {
+    showError('userMessage', error);
+    document.getElementById('userMessage').hidden = false;
+  }
+}
+
+function renderOptimization(result) {
+  const strategies = result.strategies.map(strategy => `
+    <article class="strategy-card">
+      <h3>${escapeHTML(strategy.strategy.replaceAll('_', ' '))}</h3>
+      <p>${strategy.assignments.length} assignments · ${strategy.unassigned.length} unassigned</p>
+      <p>${formatNumber(strategy.total_planned_distance_km, 3)} km planned · ${formatNumber(strategy.estimated_total_distance_km, 3)} km incl. reposition</p>
+      <ul>${strategy.assignments.map(item => `<li>${escapeHTML(item.delivery_id)} → ${escapeHTML(item.drone_id)} · ${formatNumber(item.estimated_duration_minutes)} min · ${escapeHTML(item.rationale)}</li>`).join('') || '<li>No feasible assignments.</li>'}</ul>
+      ${strategy.unassigned.map(item => `<p class="warning-copy">${escapeHTML(item.delivery_id)} unassigned: ${escapeHTML(item.reason)}</p>`).join('')}
+    </article>
+  `).join('');
+  document.getElementById('optimizerResults').innerHTML = `
+    <p>Baseline: ${escapeHTML(result.origin)} · Total planned distance ${formatNumber(result.total_planned_distance_km, 3)} km · Estimated savings vs current ${formatNumber(result.estimated_distance_savings_vs_current_km, 3)} km.</p>
+    <p class="muted-copy">${escapeHTML(result.distance_assumption)} ${escapeHTML(result.range_assumption)}</p>
+    <div class="strategy-grid">${strategies}</div>
+    ${result.constraint_violations.map(item => `<p class="warning-copy">${escapeHTML(item.delivery_id)} constraint: ${escapeHTML(item.reasons.join('; '))}</p>`).join('')}
+  `;
+}
+
+function scenarioPayload() {
+  const kind = document.getElementById('scenarioType').value;
+  const payload = {scenario_type: kind};
+  if (['drone_offline', 'range_limit'].includes(kind)) payload.drone_id = document.getElementById('scenarioDrone').value;
+  if (['deadline_missed', 'mission_infeasible'].includes(kind)) payload.delivery_id = document.getElementById('scenarioDelivery').value;
+  if (kind === 'deadline_missed') {
+    const value = document.getElementById('scenarioDeadline').value;
+    payload.deadline = value ? new Date(value).toISOString() : '';
+  }
+  if (kind === 'corridor_unavailable') payload.corridor_id = document.getElementById('scenarioCorridor').value;
+  if (kind === 'range_limit') payload.remaining_range_km = Number(document.getElementById('scenarioRange').value);
+  if (kind === 'mission_infeasible') payload.reason = document.getElementById('scenarioReason').value.trim();
+  if (kind === 'high_priority_delivery') {
+    payload.delivery_id = document.getElementById('hypotheticalDelivery').value.trim();
+    payload.pickup = {
+      lat: Number(document.getElementById('hypotheticalPickupLat').value),
+      lng: Number(document.getElementById('hypotheticalPickupLng').value)
+    };
+    payload.destination = {
+      lat: Number(document.getElementById('hypotheticalDestinationLat').value),
+      lng: Number(document.getElementById('hypotheticalDestinationLng').value)
+    };
+    payload.planned_route_km = Number(document.getElementById('hypotheticalRouteKm').value);
+    payload.deadline = null;
+  }
+  return payload;
+}
+
+function renderScenario(result) {
+  workbench.scenario = result;
+  const affectedPersisted = (result.affected_delivery_ids || []).some(id =>
+    mapState.fleet?.deliveries.some(item => item.delivery_id === id && item.status === 'CREATED')
+  );
+  document.getElementById('scenarioResult').innerHTML = `
+    <p><strong>SIMULATED</strong> · ${escapeHTML(result.scenario_type)} · Affected drones: ${escapeHTML(result.affected_drone_ids.join(', ') || 'none')} · Affected deliveries: ${escapeHTML(result.affected_delivery_ids.join(', ') || 'none')}</p>
+    <p>Estimated distance change: ${formatNumber(result.estimated_distance_change_km, 3)} km. No live telemetry or delivery state was changed by simulation.</p>
+    <h3>Recommendation rationale</h3><ul>${result.explanations.map(item => `<li>${escapeHTML(item)}</li>`).join('')}</ul>
+    <h3>Infeasible assignments and warnings</h3><ul>${result.warnings.length ? result.warnings.map(item => `<li>${escapeHTML(item.message || `${item.delivery_id || ''} ${(item.reasons || []).join('; ')}`)}</li>`).join('') : '<li>No scenario warnings.</li>'}</ul>
+    <button id="applyScenarioButton" class="button secondary" type="button" ${affectedPersisted ? '' : 'hidden'}>Approve and apply affected assignment proposal</button>
+  `;
+  const button = document.getElementById('applyScenarioButton');
+  if (button) button.addEventListener('click', applyScenario);
+}
+
+async function refreshScenarioHistory() {
+  if (!workbench.user) return;
+  try {
+    const payload = await apiRequest('/api/scenarios');
+    const list = document.getElementById('scenarioHistory');
+    list.innerHTML = payload.scenarios.length
+      ? `<ul>${payload.scenarios.map(item => `<li><button class="text-button" type="button" data-scenario-id="${escapeHTML(item.scenario_id)}">${escapeHTML(item.scenario_type)} · ${escapeHTML(item.created_at)}</button> · origin SIMULATED · ${item.applied_at ? 'approved/applied' : 'not applied'}</li>`).join('')}</ul>`
+      : '<p>No persisted scenarios yet.</p>';
+    list.querySelectorAll('[data-scenario-id]').forEach(button => button.addEventListener('click', async () => {
+      try {
+        const scenario = await apiRequest(`/api/scenarios/${encodeURIComponent(button.dataset.scenarioId)}:replay`);
+        renderScenario(scenario);
+      } catch (error) {
+        showError('scenarioMessage', error);
+      }
+    }));
+  } catch (error) {
+    document.getElementById('scenarioHistory').textContent = error instanceof Error ? error.message : 'Scenario history unavailable.';
+  }
+}
+
+function stopReplay() {
+  if (workbench.replayTimer !== null) clearInterval(workbench.replayTimer);
+  workbench.replayTimer = null;
+}
+
+function renderReplayPosition() {
+  const replay = workbench.replay;
+  const position = document.getElementById('replayPosition');
+  const timeline = document.getElementById('replayTimeline');
+  if (!replay || replay.points.length === 0) {
+    position.textContent = 'No recorded GPS points in this time range; missing coordinates were not synthesized.';
+    timeline.replaceChildren();
+    mapState.replayPath?.setMap(null);
+    mapState.replayMarker?.setMap(null);
+    mapState.replayPlannedPath?.setMap(null);
+    return;
+  }
+  const point = replay.points[workbench.replayIndex];
+  const firstTime = new Date(replay.points[0].timestamp).getTime();
+  const elapsed = Math.max(0, (new Date(point.device_timestamp).getTime() - firstTime) / 1000);
+  position.textContent = `${workbench.replayIndex + 1}/${replay.points.length} · ${formatTime(point.device_timestamp)} · ${formatNumber(point.latitude, 6)}, ${formatNumber(point.longitude, 6)} · accuracy ${formatNumber(point.accuracy_m, 1)} m · elapsed ${formatNumber(elapsed, 0)} s`;
+  timeline.innerHTML = `<input id="replaySlider" type="range" min="0" max="${replay.points.length - 1}" value="${workbench.replayIndex}" aria-label="Replay point">`;
+  document.getElementById('replaySlider').addEventListener('input', event => {
+    workbench.replayIndex = Number(event.target.value);
+    renderReplayPosition();
+    updateReplayMap();
+  });
+  document.getElementById('replayBack').disabled = workbench.replayIndex === 0;
+  document.getElementById('replayForward').disabled = workbench.replayIndex >= replay.points.length - 1;
+  updateReplayMap();
+}
+
+function updateReplayMap() {
+  if (!mapState.map || !workbench.replay?.points.length) return;
+  const points = workbench.replay.points;
+  const path = points.map(point => ({lat: point.latitude, lng: point.longitude}));
+  const lineOptions = {
+    map: mapState.map,
+    path,
+    geodesic: true,
+    strokeColor: '#f8fafc',
+    strokeOpacity: 0.75,
+    strokeWeight: 3
+  };
+  if (!mapState.replayPath) mapState.replayPath = new google.maps.Polyline(lineOptions);
+  else mapState.replayPath.setOptions(lineOptions);
+  const current = points[workbench.replayIndex];
+  const markerOptions = {
+    map: mapState.map,
+    position: {lat: current.latitude, lng: current.longitude},
+    title: `Replay · ${current.device_timestamp}`,
+    icon: {path: google.maps.SymbolPath.CIRCLE, scale: 7, fillColor: '#f8fafc', fillOpacity: 1, strokeColor: '#0b1220', strokeWeight: 2}
+  };
+  if (!mapState.replayMarker) mapState.replayMarker = new google.maps.Marker(markerOptions);
+  else mapState.replayMarker.setOptions(markerOptions);
+  const fleetDrone = mapState.fleet?.drones.find(item => item.drone_id === workbench.replay.drone_id);
+  const delivery = workbench.replay.delivery;
+  const pickup = delivery?.pickup || fleetDrone?.pickup;
+  const destination = delivery?.destination || fleetDrone?.destination;
+  if (pickup && destination) {
+    const plannedOptions = {
+      map: mapState.map,
+      path: [googlePosition(pickup), googlePosition(destination)],
+      geodesic: true,
+      strokeColor: '#fbbf24',
+      strokeOpacity: 0.9,
+      strokeWeight: 3,
+      icons: [{icon: {path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3}, offset: '0', repeat: '12px'}]
+    };
+    if (!mapState.replayPlannedPath) mapState.replayPlannedPath = new google.maps.Polyline(plannedOptions);
+    else mapState.replayPlannedPath.setOptions(plannedOptions);
+  } else {
+    mapState.replayPlannedPath?.setMap(null);
+  }
+}
+
+function stepReplay(delta) {
+  if (!workbench.replay?.points.length) return;
+  workbench.replayIndex = Math.max(0, Math.min(workbench.replay.points.length - 1, workbench.replayIndex + delta));
+  renderReplayPosition();
+}
+
+async function loadReplay(event) {
+  event.preventDefault();
+  stopReplay();
+  const start = new Date(document.getElementById('replayFrom').value);
+  const end = new Date(document.getElementById('replayTo').value);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end || end - start > 30 * 86400000) {
+    setWorkbenchMessage('replayMessage', 'Choose a valid range of at most 30 days.', 'error');
+    return;
+  }
+  const target = document.getElementById('replayTarget').value;
+  const params = new URLSearchParams({
+    [target === 'drone' ? 'drone_id' : 'delivery_id']: document.getElementById(target === 'drone' ? 'replayDrone' : 'replayDelivery').value,
+    from: start.toISOString(),
+    to: end.toISOString(),
+    limit: '2000'
+  });
+  setWorkbenchMessage('replayMessage', 'Loading bounded persisted replay…');
+  try {
+    const replay = await apiRequest(`/api/replay?${params}`);
+    if (!Array.isArray(replay.points) || !Array.isArray(replay.events) || !Array.isArray(replay.gaps)) throw new Error('Replay response is invalid.');
+    workbench.replay = replay;
+    workbench.replayTarget = target;
+    workbench.replayIndex = 0;
+    for (const id of ['replayPlay', 'replayPause', 'replayBack', 'replayForward', 'replayReport']) {
+      document.getElementById(id).disabled = replay.points.length === 0;
+    }
+    document.getElementById('replayEvents').innerHTML = `
+      <p>Origin: ${escapeHTML(replay.origin)} · ${replay.points.length} accepted fixes · ${replay.gaps.length} recording gaps · ${replay.events.length} events.</p>
+      <p>${replay.delivery?.planned_distance_km == null ? 'Planned route distance is unavailable for this selection.' : `Planned route distance: ${formatNumber(replay.delivery.planned_distance_km, 3)} km (separate from observed GPS).`}</p>
+      <ul>${replay.events.map(item => `<li>${escapeHTML(item.timestamp)} · ${escapeHTML(item.event_type)} · ${escapeHTML(item.entity_id)}</li>`).join('') || '<li>No delivery events in this range.</li>'}</ul>
+      <ul>${replay.gaps.map(item => `<li class="warning-copy">Recording gap: ${escapeHTML(item.from)} to ${escapeHTML(item.to)} (${formatNumber(item.duration_seconds, 0)} s)</li>`).join('') || '<li>No gaps over the reporting threshold detected.</li>'}</ul>
+    `;
+    setWorkbenchMessage('replayMessage', replay.points.length ? replay.message : 'No recorded GPS points for this selection.', replay.points.length ? '' : 'warning');
+    renderReplayPosition();
+  } catch (error) {
+    showError('replayMessage', error);
+  }
+}
+
+async function downloadReplayReport() {
+  if (!workbench.replay) return;
+  const replay = workbench.replay;
+  const params = new URLSearchParams({
+    [workbench.replayTarget === 'delivery' ? 'delivery_id' : 'drone_id']: workbench.replayTarget === 'delivery' ? replay.delivery.delivery_id : replay.drone_id,
+    from: replay.time_range.from,
+    to: replay.time_range.to
+  });
+  try {
+    const payload = await apiRequest(`/api/replay/report?${params}`);
+    const blob = new Blob([JSON.stringify(payload.report, null, 2)], {type: 'application/json'});
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'stormpilot-mission-report.json';
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    showError('replayMessage', error);
+  }
+}
+
+document.getElementById('loginForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const payload = await apiRequest('/api/auth/login', 'POST', {
+      username: document.getElementById('loginUsername').value,
+      password: document.getElementById('loginPassword').value
+    });
+    document.getElementById('loginPassword').value = '';
+    setAuthState(payload.user);
+  } catch (error) {
+    showError('authMessage', error);
+  }
+});
+
+document.getElementById('logoutButton').addEventListener('click', async () => {
+  try {
+    await apiRequest('/api/auth/logout', 'POST', {});
+    setAuthState(null);
+    setWorkbenchMessage('optimizerMessage', 'Sign in as ADMIN or OPERATOR to request a plan.');
+    setWorkbenchMessage('scenarioMessage', 'Sign in as ADMIN or OPERATOR to run a deterministic simulation.');
+    setWorkbenchMessage('replayMessage', 'Sign in to query persisted route history.');
+    document.getElementById('optimizerResults').replaceChildren();
+    document.getElementById('scenarioResult').replaceChildren();
+    stopReplay();
+    mapState.replayPath?.setMap(null);
+    mapState.replayMarker?.setMap(null);
+    mapState.replayPlannedPath?.setMap(null);
+  } catch (error) {
+    showError('authMessage', error);
+  }
+});
+
+document.getElementById('userCreateForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await apiRequest('/api/admin/users', 'POST', {
+      username: document.getElementById('newUsername').value.trim(),
+      password: document.getElementById('newPassword').value,
+      role: document.getElementById('newRole').value
+    });
+    event.target.reset();
+    document.getElementById('userMessage').hidden = false;
+    setWorkbenchMessage('userMessage', 'Account created.', 'success');
+    await refreshUsers();
+  } catch (error) {
+    document.getElementById('userMessage').hidden = false;
+    showError('userMessage', error);
+  }
+});
+
+document.getElementById('userList').addEventListener('submit', async event => {
+  if (!event.target.matches('.user-row')) return;
+  event.preventDefault();
+  const form = event.target;
+  const payload = {
+    role: form.elements.role.value,
+    enabled: form.elements.enabled.checked
+  };
+  if (form.elements.password.value) payload.password = form.elements.password.value;
+  try {
+    await apiRequest(`/api/admin/users/${encodeURIComponent(form.dataset.userId)}`, 'PUT', payload);
+    form.elements.password.value = '';
+    document.getElementById('userMessage').hidden = false;
+    setWorkbenchMessage('userMessage', 'Account updated; affected sessions were revoked where required.', 'success');
+    await refreshUsers();
+    await refreshSession();
+  } catch (error) {
+    document.getElementById('userMessage').hidden = false;
+    showError('userMessage', error);
+  }
+});
+
+document.getElementById('optimizeButton').addEventListener('click', async () => {
+  setWorkbenchMessage('optimizerMessage', 'Comparing deterministic assignment strategies…');
+  try {
+    const result = await apiRequest('/api/missions/optimize', 'POST', {});
+    workbench.optimization = result;
+    renderOptimization(result);
+    document.getElementById('applyOptimizationButton').hidden = result.recommended_assignments.length === 0;
+    setWorkbenchMessage('optimizerMessage', 'Plan ready. Review the constraints and explicitly approve before changing eligible live assignments.', 'success');
+  } catch (error) {
+    showError('optimizerMessage', error);
+  }
+});
+
+document.getElementById('applyOptimizationButton').addEventListener('click', async () => {
+  if (!workbench.optimization?.optimization_id) return;
+  if (!window.confirm('Apply this reviewed assignment proposal to eligible CREATED deliveries?')) return;
+  try {
+    const result = await apiRequest('/api/missions/optimize/apply', 'POST', {optimization_id: workbench.optimization.optimization_id});
+    setWorkbenchMessage('optimizerMessage', `${result.assignments_applied} assignment(s) applied by your approval.`, 'success');
+    document.getElementById('applyOptimizationButton').hidden = true;
+    refreshNow();
+  } catch (error) {
+    showError('optimizerMessage', error);
+  }
+});
+
+document.getElementById('scenarioType').addEventListener('change', updateScenarioFields);
+document.getElementById('scenarioForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  setWorkbenchMessage('scenarioMessage', 'Capturing a persisted baseline and running the isolated scenario…');
+  try {
+    const result = await apiRequest('/api/scenarios', 'POST', scenarioPayload());
+    renderScenario(result);
+    setWorkbenchMessage('scenarioMessage', `Scenario ${result.scenario_id} stored as SIMULATED. No live GPS or delivery state changed.`, 'success');
+    await refreshScenarioHistory();
+  } catch (error) {
+    showError('scenarioMessage', error);
+  }
+});
+
+async function applyScenario() {
+  if (!workbench.scenario || !window.confirm('Apply the reviewed proposal to eligible persisted CREATED deliveries?')) return;
+  try {
+    const result = await apiRequest(`/api/scenarios/${encodeURIComponent(workbench.scenario.scenario_id)}/apply`, 'POST', {approved: true});
+    setWorkbenchMessage('scenarioMessage', `${result.assignments_applied} assignment(s) applied by operator approval.`, 'success');
+    await refreshScenarioHistory();
+    refreshNow();
+  } catch (error) {
+    showError('scenarioMessage', error);
+  }
+}
+
+document.getElementById('refreshScenarios').addEventListener('click', refreshScenarioHistory);
+document.getElementById('replayForm').addEventListener('submit', loadReplay);
+document.getElementById('replayTarget').addEventListener('change', event => {
+  const isDrone = event.target.value === 'drone';
+  document.getElementById('replayDroneField').hidden = !isDrone;
+  document.getElementById('replayDeliveryField').hidden = isDrone;
+});
+document.getElementById('replayPlay').addEventListener('click', () => {
+  if (!workbench.replay?.points.length || workbench.replayTimer !== null) return;
+  const speed = Number(document.getElementById('replaySpeed').value);
+  workbench.replayTimer = setInterval(() => {
+    if (workbench.replayIndex >= workbench.replay.points.length - 1) {
+      stopReplay();
+      return;
+    }
+    stepReplay(speed);
+  }, 1000);
+});
+document.getElementById('replayPause').addEventListener('click', stopReplay);
+document.getElementById('replayBack').addEventListener('click', () => stepReplay(-1));
+document.getElementById('replayForward').addEventListener('click', () => stepReplay(1));
+document.getElementById('replayReport').addEventListener('click', downloadReplayReport);
+
+const defaultReplayTo = new Date();
+const defaultReplayFrom = new Date(defaultReplayTo.getTime() - 24 * 60 * 60 * 1000);
+document.getElementById('replayTo').value = new Date(defaultReplayTo.getTime() - defaultReplayTo.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+document.getElementById('replayFrom').value = new Date(defaultReplayFrom.getTime() - defaultReplayFrom.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+document.getElementById('scenarioDeadline').value = new Date(Date.now() - 60 * 60000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+updateScenarioFields();
+refreshSession();
 
 document.getElementById('refreshButton').addEventListener('click', refreshNow);
 selectedDroneSelect.addEventListener('change', () => selectDrone(selectedDroneSelect.value));

@@ -28,7 +28,9 @@ assert json.loads(fetch('/healthz'))['status'] == 'ok'
 assert json.loads(fetch('/dispatch'))['status'] == 'dispatched'
 assert 'stormpilot_requests_total' in fetch('/metrics')
 assert 'id="map"' in fetch('/ui')
-assert 'id="adminToken"' in fetch('/drone/connect')
+assert 'id="loginForm"' in fetch('/ui') and 'id="authRole"' in fetch('/ui')
+assert 'id="authStatus"' in fetch('/drone/connect')
+assert 'adminToken' not in fetch('/drone/connect')
 config = json.loads(fetch('/api/config'))
 assert isinstance(config.get('map_ready'), bool)
 fleet = json.loads(fetch('/api/fleet'))
@@ -40,4 +42,4 @@ twin = json.loads(fetch('/api/twin'))
 assert twin['origin'] == 'simulated' and twin['scenarios']
 workspace = json.loads(fetch('/api/redmine'))
 assert 'configured' in workspace
-print('PASS: readiness, identity, health, UI, config, four-drone fleet, traffic, twin, dispatch, metrics and Redmine')
+print('PASS: readiness, identity, health, login UI, device auth UI, config, four-drone fleet, traffic, twin, dispatch, metrics and Redmine')

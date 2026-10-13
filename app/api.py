@@ -19,8 +19,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 try:
     from app import db as store
+    from app import optimizer
+    from app import security
 except ImportError:  # pragma: no cover
     import db as store
+    import optimizer
+    import security
 
 DRONE_COLORS = ('#2dd4bf', '#a78bfa', '#fbbf24', '#4ade80')
 DEMO_DRONES = [
@@ -284,6 +288,95 @@ def record_delivery_confirmation(delivery_id, drone_id, confirmed_by='operator',
 
 
 def handle(method, path, body=None, headers=None, query=''):
+    if method == 'POST' and path == '/api/auth/login':
+        status, payload, response_headers = security.login(_read_json(body), headers)
+        return status, _attach_response_headers(payload, response_headers)
+
+    if method == 'GET' and path == '/api/auth/session':
+        return security.session(headers)
+
+    if method == 'POST' and path == '/api/auth/logout':
+        status, payload, response_headers = security.logout(headers)
+        return status, _attach_response_headers(payload, response_headers)
+
+    if method == 'GET' and path == '/api/admin/users':
+        user, error = security.authorize(headers, {'ADMIN'}, 'admin.users.list', method)
+        if error:
+            return error
+        return 200, {'users': security.list_users()}
+
+    if method == 'POST' and path == '/api/admin/users':
+        user, error = security.authorize(headers, {'ADMIN'}, 'admin.users.create', method)
+        if error:
+            return error
+        data = _read_json(body)
+        if not isinstance(data, dict):
+            return 400, {'error': 'Expected a JSON object.'}
+        return security.create_user(data.get('username'), data.get('password'), data.get('role'), actor=user['user_id'])
+
+    if method == 'PUT' and path.startswith('/api/admin/users/'):
+        user, error = security.authorize(headers, {'ADMIN'}, 'admin.users.update', method)
+        if error:
+            return error
+        user_id = path.rsplit('/', 1)[-1]
+        if not user_id or user_id == 'users':
+            return 404, {'error': 'Account not found.'}
+        return security.update_user(user_id, _read_json(body), user)
+
+    if method == 'POST' and path == '/api/missions/optimize':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'missions.optimize', method)
+        if error:
+            return error
+        return _create_optimization(_read_json(body), user)
+
+    if method == 'POST' and path == '/api/missions/optimize/apply':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'missions.optimize.apply', method)
+        if error:
+            return error
+        return _apply_optimization(_read_json(body), user)
+
+    if method == 'GET' and path == '/api/scenarios':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'scenarios.list', method)
+        if error:
+            return error
+        return _scenario_list()
+
+    if method == 'POST' and path == '/api/scenarios':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'scenarios.simulate', method)
+        if error:
+            return error
+        return _create_scenario(_read_json(body), user)
+
+    if method == 'GET' and path.startswith('/api/scenarios/'):
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'scenarios.read', method)
+        if error:
+            return error
+        scenario_id = path.rsplit('/', 1)[-1]
+        if scenario_id.endswith(':replay'):
+            return _replay_scenario(scenario_id[:-7])
+        return _get_scenario(scenario_id)
+
+    if method == 'POST' and path.startswith('/api/scenarios/') and path.endswith('/apply'):
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'scenarios.apply', method)
+        if error:
+            return error
+        return _apply_scenario(path.split('/')[-2], _read_json(body), user)
+
+    if method == 'GET' and path == '/api/replay':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'replay.read', method)
+        if error:
+            return error
+        return _route_replay(query)
+
+    if method == 'GET' and path == '/api/replay/report':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'replay.report', method)
+        if error:
+            return error
+        status, report = _route_replay(query)
+        if status != 200:
+            return status, report
+        return 200, {'report': _replay_report(report)}
+
     if method == 'GET' and path == '/api/config':
         return 200, {
             'google_maps_api_key': os.getenv('GOOGLE_MAPS_API_KEY', '').strip(),
@@ -301,19 +394,19 @@ def handle(method, path, body=None, headers=None, query=''):
         return _twin_payload()
 
     if method == 'PUT' and path == '/api/twin/config':
-        authorization = _authorize_admin(headers)
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'twin.config.update', method)
         if authorization is not None:
             return authorization
         return _save_twin_config(body)
 
     if method == 'POST' and path == '/api/device/register':
-        authorization = _authorize_admin(headers)
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'device.register', method)
         if authorization is not None:
             return authorization
         return _handle_device_register(body)
 
     if method == 'DELETE' and path == '/api/device/revoke':
-        authorization = _authorize_admin(headers)
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'device.revoke', method)
         if authorization is not None:
             return authorization
         return _handle_device_revoke(body)
@@ -322,10 +415,10 @@ def handle(method, path, body=None, headers=None, query=''):
         return _handle_telemetry(body, headers=headers)
 
     if method == 'POST' and path == '/api/delivery/confirm':
-        authorization = _authorize_admin(headers)
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'delivery.confirm', method)
         if authorization is not None:
             return authorization
-        return _handle_delivery_confirm(body)
+        return _handle_delivery_confirm(body, confirmed_by=user['username'])
 
     if method == 'POST' and path == '/api/email/test':
         return _handle_email_test(body)
@@ -335,8 +428,677 @@ def handle(method, path, body=None, headers=None, query=''):
 
     if method == 'GET' and path.startswith('/api/'):
         return 404, {'error': 'not found'}
-
     return 404, {'error': 'not found'}
+
+
+def _attach_response_headers(payload, headers):
+    if headers:
+        payload['_response_headers'] = headers
+    return payload
+
+
+def _create_optimization(payload, user):
+    if payload not in (None, {}):
+        return 400, {'error': 'Optimization currently uses persisted active delivery records; no request overrides are accepted.'}
+    snapshot = optimizer.capture_snapshot()
+    result = optimizer.optimize(snapshot)
+    proposal_id = secrets.token_urlsafe(18)
+    conn = store.get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO simulation_runs (
+                scenario_id, scenario_type, input_json, baseline_json,
+                result_json, created_by
+            ) VALUES (?, 'OPTIMIZATION_PROPOSAL', '{}', ?, ?, ?)
+            """,
+            (
+                proposal_id,
+                json.dumps(snapshot, separators=(',', ':'), sort_keys=True),
+                json.dumps(result, separators=(',', ':'), sort_keys=True),
+                user['user_id'],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    result['optimization_id'] = proposal_id
+    result['approval_required'] = True
+    return 200, result
+
+
+def _apply_optimization(payload, user):
+    if not isinstance(payload, dict) or not isinstance(payload.get('optimization_id'), str):
+        return 400, {'error': 'optimization_id is required.'}
+    conn = store.get_connection()
+    try:
+        with conn:
+            proposal = conn.execute(
+                """
+                SELECT * FROM simulation_runs WHERE scenario_id = ?
+                    AND scenario_type = 'OPTIMIZATION_PROPOSAL'
+                """,
+                (payload['optimization_id'],),
+            ).fetchone()
+            if proposal is None:
+                return 404, {'error': 'Optimization proposal not found.'}
+            if proposal['applied_at']:
+                return 409, {'error': 'This optimization proposal has already been applied.'}
+            baseline = json.loads(proposal['baseline_json'])
+            result = json.loads(proposal['result_json'])
+            current_deliveries = conn.execute(
+                "SELECT delivery_id, drone_id, status FROM deliveries WHERE status NOT IN ('DELIVERED','CANCELLED','FAILED') ORDER BY delivery_id"
+            ).fetchall()
+            expected = {
+                (item['delivery_id'], item['drone_id'], item['status'])
+                for item in baseline['deliveries']
+            }
+            observed = {
+                (row['delivery_id'], row['drone_id'], row['status'])
+                for row in current_deliveries
+            }
+            if expected != observed:
+                return 409, {'error': 'Live delivery assignments changed since this proposal; optimize again before applying.'}
+            current_snapshot = optimizer.capture_snapshot()
+            current_states = {item['drone_id']: item['state'] for item in current_snapshot['drones']}
+            proposed = result.get('recommended_assignments', [])
+            for item in proposed:
+                if item['drone_id'] in current_states and current_states[item['drone_id']] != 'PHONE_GPS':
+                    return 409, {'error': f"Drone {item['drone_id']} is no longer connected; optimize again."}
+            updated_count = 0
+            for assignment in proposed:
+                prior = next(
+                    (
+                        item for item in baseline['deliveries']
+                        if item['delivery_id'] == assignment['delivery_id']
+                    ),
+                    None,
+                )
+                if prior is None or prior['status'] != 'CREATED':
+                    continue
+                changed = conn.execute(
+                    """
+                    UPDATE deliveries SET drone_id = ?, status = 'ASSIGNED', updated_at = ?
+                    WHERE delivery_id = ? AND status = 'CREATED' AND drone_id = ?
+                    """,
+                    (
+                        assignment['drone_id'],
+                        _utc_now(),
+                        assignment['delivery_id'],
+                        prior['drone_id'],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise sqlite3.OperationalError('Delivery assignment changed concurrently.')
+                evidence = {
+                    'optimization_id': proposal['scenario_id'],
+                    'approved_by': user['username'],
+                    'estimated_route_distance_km': assignment['estimated_route_distance_km'],
+                }
+                conn.execute(
+                    """
+                    INSERT INTO delivery_state_history (
+                        delivery_id, previous_status, new_status, reason, evidence
+                    ) VALUES (?, 'CREATED', 'ASSIGNED', 'operator_approved_optimizer_assignment', ?)
+                    """,
+                    (assignment['delivery_id'], json.dumps(evidence, separators=(',', ':'), sort_keys=True)),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO event_log(id, event_type, entity_type, entity_id, payload)
+                    VALUES (?, 'MISSION_ASSIGNMENT_APPROVED', 'DELIVERY', ?, ?)
+                    """,
+                    (
+                        f"optimizer-assignment-{proposal['scenario_id']}-{assignment['delivery_id']}",
+                        assignment['delivery_id'],
+                        json.dumps(evidence, separators=(',', ':'), sort_keys=True),
+                    ),
+                )
+                updated_count += 1
+            conn.execute(
+                'UPDATE simulation_runs SET applied_at = ? WHERE scenario_id = ? AND applied_at IS NULL',
+                (_utc_now(), proposal['scenario_id']),
+            )
+        return 200, {
+            'status': 'applied',
+            'optimization_id': proposal['scenario_id'],
+            'assignments_applied': updated_count,
+            'approved_by': user['username'],
+        }
+    except sqlite3.OperationalError:
+        return 409, {'error': 'Live delivery state changed concurrently; the proposal was not applied.'}
+    finally:
+        conn.close()
+
+
+def _scenario_list():
+    conn = store.get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT scenario_id, scenario_type, input_json, created_by, created_at, applied_at
+            FROM simulation_runs WHERE scenario_type != 'OPTIMIZATION_PROPOSAL'
+            ORDER BY created_at DESC LIMIT 100
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    return 200, {
+        'origin': 'SIMULATED',
+        'scenarios': [{
+            'scenario_id': row['scenario_id'],
+            'scenario_type': row['scenario_type'],
+            'inputs': json.loads(row['input_json']),
+            'created_by': row['created_by'],
+            'created_at': row['created_at'],
+            'applied_at': row['applied_at'],
+        } for row in rows],
+    }
+
+
+def _create_scenario(payload, user):
+    normalized, error = _validate_scenario(payload)
+    if error:
+        return 400, {'error': error}
+    snapshot = optimizer.capture_snapshot()
+    baseline = optimizer.optimize(snapshot)
+    scenario_changes = _scenario_changes(normalized, snapshot)
+    proposed = optimizer.optimize(snapshot, scenario_changes)
+    baseline_map = {item['delivery_id']: item for item in baseline['recommended_assignments']}
+    proposed_map = {item['delivery_id']: item for item in proposed['recommended_assignments']}
+    baseline_unassigned = {
+        item['delivery_id'] for item in baseline['unassigned_deliveries']
+    }
+    proposed_unassigned = {
+        item['delivery_id'] for item in proposed['unassigned_deliveries']
+    }
+    affected_deliveries = sorted(
+        set(baseline_map) | set(proposed_map)
+    )
+    affected_deliveries = [
+        delivery_id for delivery_id in affected_deliveries
+        if (
+            baseline_map.get(delivery_id, {}).get('drone_id')
+            != proposed_map.get(delivery_id, {}).get('drone_id')
+            or (delivery_id in baseline_unassigned) != (delivery_id in proposed_unassigned)
+        )
+    ]
+    base_durations = {key: value.get('estimated_duration_minutes') for key, value in baseline_map.items()}
+    proposed_durations = {key: value.get('estimated_duration_minutes') for key, value in proposed_map.items()}
+    affected = sorted({
+        drone for delivery_id in affected_deliveries
+        for drone in (
+            baseline_map.get(delivery_id, {}).get('drone_id'),
+            proposed_map.get(delivery_id, {}).get('drone_id'),
+        ) if drone
+    })
+    if normalized['scenario_type'] == 'shared_corridor':
+        affected = ['SIM-DRONE-01', 'SIM-DRONE-02']
+    warnings = list(proposed['constraint_violations'])
+    if normalized['scenario_type'] == 'shared_corridor':
+        warnings.append({
+            'kind': 'simulated_shared_corridor',
+            'message': 'Two virtual drones approach the same corridor; this is a deterministic tabletop scenario, not live traffic.',
+        })
+    outcome = {
+        'origin': 'SIMULATED',
+        'scenario_type': normalized['scenario_type'],
+        'inputs': normalized,
+        'baseline_plan': baseline,
+        'proposed_plan': proposed,
+        'affected_drone_ids': affected,
+        'affected_delivery_ids': affected_deliveries,
+        'estimated_delay_minutes': {
+            delivery_id: (
+                round(proposed_durations[delivery_id] - base_durations[delivery_id], 1)
+                if delivery_id in proposed_durations and delivery_id in base_durations else None
+            )
+            for delivery_id in affected_deliveries
+        },
+        'estimated_distance_change_km': round(
+            proposed['total_planned_distance_km'] - baseline['total_planned_distance_km'], 3,
+        ),
+        'infeasible_assignments': proposed['unassigned_deliveries'],
+        'warnings': warnings,
+        'explanations': _scenario_explanations(normalized, affected_deliveries, proposed),
+        'approval_required_before_live_application': True,
+    }
+    scenario_id = secrets.token_urlsafe(18)
+    conn = store.get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO simulation_runs (
+                scenario_id, scenario_type, input_json, baseline_json,
+                result_json, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scenario_id,
+                normalized['scenario_type'],
+                json.dumps(normalized, separators=(',', ':'), sort_keys=True),
+                json.dumps(snapshot, separators=(',', ':'), sort_keys=True),
+                json.dumps(outcome, separators=(',', ':'), sort_keys=True),
+                user['user_id'],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    outcome['scenario_id'] = scenario_id
+    return 201, outcome
+
+
+def _get_scenario(scenario_id):
+    row = _scenario_row(scenario_id)
+    if row is None:
+        return 404, {'error': 'Scenario not found.'}
+    return 200, json.loads(row['result_json'])
+
+
+def _replay_scenario(scenario_id):
+    row = _scenario_row(scenario_id)
+    if row is None or row['scenario_type'] == 'OPTIMIZATION_PROPOSAL':
+        return 404, {'error': 'Scenario not found.'}
+    result = json.loads(row['result_json'])
+    result['origin'] = 'SIMULATED'
+    result['scenario_id'] = scenario_id
+    result['replayed'] = True
+    return 200, result
+
+
+def _apply_scenario(scenario_id, payload, user):
+    if not isinstance(payload, dict) or payload.get('approved') is not True:
+        return 400, {'error': 'Explicit operator approval is required.'}
+    row = _scenario_row(scenario_id)
+    if row is None or row['scenario_type'] == 'OPTIMIZATION_PROPOSAL':
+        return 404, {'error': 'Scenario not found.'}
+    if row['applied_at']:
+        return 409, {'error': 'This scenario proposal was already applied.'}
+    result = json.loads(row['result_json'])
+    if result['inputs']['scenario_type'] == 'high_priority_delivery':
+        return 409, {'error': 'A hypothetical delivery is not automatically materialized; create a real delivery through an approved operational workflow.'}
+    conn = store.get_connection()
+    try:
+        with conn:
+            current = conn.execute(
+                "SELECT delivery_id, drone_id, status FROM deliveries WHERE status NOT IN ('DELIVERED','CANCELLED','FAILED') ORDER BY delivery_id"
+            ).fetchall()
+            baseline = json.loads(row['baseline_json'])
+            expected = {
+                (item['delivery_id'], item['drone_id'], item['status'])
+                for item in baseline['deliveries']
+            }
+            observed = {(item['delivery_id'], item['drone_id'], item['status']) for item in current}
+            if expected != observed:
+                return 409, {'error': 'Live assignments changed since this scenario; replay against a fresh baseline.'}
+            baseline_ids = {item['delivery_id'] for item in baseline['deliveries']}
+            proposed = result['proposed_plan'].get('recommended_assignments', [])
+            changes = 0
+            for assignment in proposed:
+                if assignment['delivery_id'] not in baseline_ids:
+                    continue
+                prior = next(item for item in baseline['deliveries'] if item['delivery_id'] == assignment['delivery_id'])
+                if prior['status'] != 'CREATED':
+                    continue
+                changed = conn.execute(
+                    """
+                    UPDATE deliveries SET drone_id = ?, status = 'ASSIGNED', updated_at = ?
+                    WHERE delivery_id = ? AND drone_id = ? AND status = 'CREATED'
+                    """,
+                    (assignment['drone_id'], _utc_now(), assignment['delivery_id'], prior['drone_id']),
+                ).rowcount
+                if changed != 1:
+                    raise sqlite3.OperationalError('Delivery assignment changed concurrently.')
+                evidence = {
+                    'scenario_id': scenario_id,
+                    'approved_by': user['username'],
+                    'origin': 'SIMULATED_PROPOSAL_OPERATOR_APPROVED',
+                }
+                conn.execute(
+                    """
+                    INSERT INTO delivery_state_history(delivery_id, previous_status, new_status, reason, evidence)
+                    VALUES (?, 'CREATED', 'ASSIGNED', 'operator_approved_scenario_assignment', ?)
+                    """,
+                    (assignment['delivery_id'], json.dumps(evidence, separators=(',', ':'), sort_keys=True)),
+                )
+                conn.execute(
+                    'INSERT INTO event_log(id, event_type, entity_type, entity_id, payload) VALUES (?, ?, ?, ?, ?)',
+                    (
+                        f"scenario-assignment-{scenario_id}-{assignment['delivery_id']}",
+                        'SCENARIO_ASSIGNMENT_APPROVED',
+                        'DELIVERY',
+                        assignment['delivery_id'],
+                        json.dumps(evidence, separators=(',', ':'), sort_keys=True),
+                    ),
+                )
+                changes += 1
+            conn.execute(
+                'UPDATE simulation_runs SET applied_at = ? WHERE scenario_id = ? AND applied_at IS NULL',
+                (_utc_now(), scenario_id),
+            )
+        return 200, {
+            'status': 'applied',
+            'scenario_id': scenario_id,
+            'assignments_applied': changes,
+            'approved_by': user['username'],
+            'origin': 'SIMULATED_PROPOSAL_OPERATOR_APPROVED',
+        }
+    except sqlite3.OperationalError:
+        return 409, {'error': 'Live delivery state changed concurrently; no partial scenario changes were applied.'}
+    finally:
+        conn.close()
+
+
+def _route_replay(query):
+    params = parse_qs(query or '')
+    drone_id = params.get('drone_id', [''])[0].strip()
+    delivery_id = params.get('delivery_id', [''])[0].strip()
+    if bool(drone_id) == bool(delivery_id):
+        return 400, {'error': 'Select exactly one drone_id or delivery_id.'}
+    limit_text = params.get('limit', ['1000'])[0]
+    try:
+        limit = int(limit_text)
+    except ValueError:
+        return 400, {'error': 'limit must be between 1 and 2000.'}
+    if not 1 <= limit <= 2000:
+        return 400, {'error': 'limit must be between 1 and 2000.'}
+    now = datetime.now(timezone.utc)
+    end = _parse_replay_time(params.get('to', [_iso_utc(now)])[0])
+    start = _parse_replay_time(params.get('from', [_iso_utc(now - timedelta(hours=24))])[0])
+    if not start or not end or end <= start or end - start > timedelta(days=30):
+        return 400, {'error': 'A valid time range no longer than 30 days is required.'}
+    conn = store.get_connection()
+    try:
+        if delivery_id:
+            delivery = conn.execute('SELECT * FROM deliveries WHERE delivery_id = ?', (delivery_id,)).fetchone()
+            if delivery is None:
+                return 404, {'error': 'Delivery not found.'}
+            drone_id = delivery['drone_id']
+        else:
+            delivery = conn.execute(
+                'SELECT * FROM deliveries WHERE drone_id = ? ORDER BY updated_at DESC LIMIT 1',
+                (drone_id,),
+            ).fetchone()
+        clauses = ["drone_id = ?", "status = 'ACCEPTED'", 'datetime(device_timestamp) >= datetime(?)', 'datetime(device_timestamp) <= datetime(?)']
+        values = [drone_id, _iso_utc(start), _iso_utc(end), limit]
+        samples = conn.execute(
+            f"""
+            SELECT id, latitude, longitude, accuracy, device_timestamp, server_received_at, source
+            FROM telemetry_samples WHERE {' AND '.join(clauses)}
+            ORDER BY device_timestamp ASC, id ASC LIMIT ?
+            """,
+            values,
+        ).fetchall()
+        events = []
+        if delivery:
+            events = conn.execute(
+                """
+                SELECT event_type, entity_type, entity_id, timestamp, payload
+                FROM event_log WHERE entity_id = ? AND datetime(timestamp) >= datetime(?)
+                    AND datetime(timestamp) <= datetime(?)
+                ORDER BY timestamp ASC LIMIT 500
+                """,
+                (delivery['delivery_id'], _iso_utc(start), _iso_utc(end)),
+            ).fetchall()
+            state_events = conn.execute(
+                """
+                SELECT previous_status, new_status, changed_at, reason, evidence
+                FROM delivery_state_history WHERE delivery_id = ?
+                    AND datetime(changed_at) >= datetime(?) AND datetime(changed_at) <= datetime(?)
+                ORDER BY changed_at ASC LIMIT 500
+                """,
+                (delivery['delivery_id'], _iso_utc(start), _iso_utc(end)),
+            ).fetchall()
+        else:
+            state_events = []
+    finally:
+        conn.close()
+    points = [{
+        'latitude': row['latitude'],
+        'longitude': row['longitude'],
+        'accuracy_m': row['accuracy'],
+        'device_timestamp': row['device_timestamp'],
+        'server_received_at': row['server_received_at'],
+        'source': row['source'],
+        'sample_id': row['id'],
+    } for row in samples]
+    gaps = []
+    for first, second in zip(points, points[1:]):
+        first_time = _parse_replay_time(first['device_timestamp'])
+        second_time = _parse_replay_time(second['device_timestamp'])
+        if first_time and second_time and (second_time - first_time).total_seconds() > 120:
+            gaps.append({
+                'from': first['device_timestamp'],
+                'to': second['device_timestamp'],
+                'duration_seconds': int((second_time - first_time).total_seconds()),
+            })
+    delivery_data = None
+    if delivery:
+        delivery_data = {
+            'delivery_id': delivery['delivery_id'],
+            'status': delivery['status'],
+            'drone_id': delivery['drone_id'],
+            'planned_distance_km': delivery['planned_route_km'],
+            'pickup': {'latitude': delivery['pickup_lat'], 'longitude': delivery['pickup_lng']}
+                if delivery['pickup_lat'] is not None and delivery['pickup_lng'] is not None else None,
+            'destination': {'latitude': delivery['destination_lat'], 'longitude': delivery['destination_lng']}
+                if delivery['destination_lat'] is not None and delivery['destination_lng'] is not None else None,
+        }
+    return 200, {
+        'origin': 'HISTORICAL_PERSISTED',
+        'drone_id': drone_id,
+        'delivery': delivery_data,
+        'time_range': {'from': _iso_utc(start), 'to': _iso_utc(end)},
+        'points': points,
+        'sample_limit': limit,
+        'truncated': len(points) == limit,
+        'gaps': gaps,
+        'events': [{
+            'event_type': row['event_type'],
+            'entity_id': row['entity_id'],
+            'timestamp': row['timestamp'],
+            'payload': _safe_json_object(row['payload']),
+        } for row in events] + [{
+            'event_type': 'DELIVERY_STATE_CHANGED',
+            'entity_id': delivery['delivery_id'],
+            'timestamp': row['changed_at'],
+            'payload': {
+                'previous_status': row['previous_status'],
+                'new_status': row['new_status'],
+                'reason': row['reason'],
+                'evidence': _safe_json_object(row['evidence']),
+            },
+        } for row in state_events],
+        'read_only': True,
+        'message': 'Only accepted persisted GPS samples are shown. Missing positions remain gaps; no coordinates are interpolated.',
+    }
+
+
+def _replay_report(replay):
+    return {
+        'title': f"StormPilot mission replay: {replay['delivery']['delivery_id'] if replay['delivery'] else replay['drone_id']}",
+        'origin': replay['origin'],
+        'drone_id': replay['drone_id'],
+        'delivery': replay['delivery'],
+        'time_range': replay['time_range'],
+        'sample_count': len(replay['points']),
+        'first_recorded_point': replay['points'][0] if replay['points'] else None,
+        'last_recorded_point': replay['points'][-1] if replay['points'] else None,
+        'gps_gap_count': len(replay['gaps']),
+        'events': replay['events'],
+        'limitations': replay['message'],
+    }
+
+
+def _validate_scenario(payload):
+    allowed = {
+        'drone_offline', 'deadline_missed', 'corridor_unavailable',
+        'range_limit', 'shared_corridor', 'mission_infeasible',
+        'high_priority_delivery',
+    }
+    if not isinstance(payload, dict) or payload.get('scenario_type') not in allowed:
+        return None, 'scenario_type must be one of the documented what-if scenarios.'
+    kind = payload['scenario_type']
+    fields = {
+        'drone_offline': {'scenario_type', 'drone_id'},
+        'deadline_missed': {'scenario_type', 'delivery_id', 'deadline'},
+        'corridor_unavailable': {'scenario_type', 'corridor_id'},
+        'range_limit': {'scenario_type', 'drone_id', 'remaining_range_km'},
+        'shared_corridor': {'scenario_type'},
+        'mission_infeasible': {'scenario_type', 'delivery_id', 'reason'},
+        'high_priority_delivery': {
+            'scenario_type', 'delivery_id', 'pickup', 'destination',
+            'planned_route_km', 'deadline',
+        },
+    }[kind]
+    if set(payload) - fields:
+        return None, 'Scenario contains unsupported fields.'
+    snapshot = optimizer.capture_snapshot()
+    drone_ids = {item['drone_id'] for item in snapshot['drones']}
+    delivery_ids = {item['delivery_id'] for item in snapshot['deliveries']}
+    twin = snapshot.get('twin', {})
+    corridor_ids = {item['id'] for item in twin.get('corridors', [])}
+    if kind in {'drone_offline', 'range_limit'} and payload.get('drone_id') not in drone_ids:
+        return None, 'Select a registered drone.'
+    if kind == 'deadline_missed':
+        if payload.get('delivery_id') not in delivery_ids or not _parse_replay_time(payload.get('deadline')):
+            return None, 'Select a persisted delivery and provide an ISO-8601 deadline.'
+        if _parse_replay_time(payload['deadline']) > datetime.now(timezone.utc):
+            return None, 'The missed deadline must be in the past.'
+    if kind == 'corridor_unavailable' and payload.get('corridor_id') not in corridor_ids:
+        return None, 'Select a configured virtual corridor.'
+    if kind == 'range_limit':
+        try:
+            value = float(payload.get('remaining_range_km'))
+        except (TypeError, ValueError):
+            return None, 'remaining_range_km must be a positive number.'
+        if not math.isfinite(value) or value <= 0:
+            return None, 'remaining_range_km must be a positive number.'
+        payload = {**payload, 'remaining_range_km': value}
+    if kind == 'mission_infeasible':
+        if payload.get('delivery_id') not in delivery_ids:
+            return None, 'Select a persisted delivery.'
+        reason = payload.get('reason')
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 200:
+            return None, 'Provide a scenario reason no longer than 200 characters.'
+    if kind == 'high_priority_delivery':
+        delivery_id = payload.get('delivery_id')
+        if not isinstance(delivery_id, str) or not delivery_id.strip() or len(delivery_id) > 64:
+            return None, 'Provide a hypothetical delivery ID no longer than 64 characters.'
+        for key in ('pickup', 'destination'):
+            point = payload.get(key)
+            if not isinstance(point, dict) or not _valid_coordinate(point.get('lat'), point.get('lng')):
+                return None, f'{key} must contain valid lat and lng coordinates.'
+        try:
+            distance = float(payload.get('planned_route_km'))
+        except (TypeError, ValueError):
+            return None, 'planned_route_km must be a positive number.'
+        if not math.isfinite(distance) or distance <= 0:
+            return None, 'planned_route_km must be a positive number.'
+        deadline = payload.get('deadline')
+        if deadline is not None and not _parse_replay_time(deadline):
+            return None, 'deadline must be an ISO-8601 timestamp or null.'
+        payload = {
+            **payload,
+            'delivery_id': delivery_id.strip(),
+            'planned_route_km': distance,
+            'priority': 'high',
+        }
+    return payload, None
+
+
+def _scenario_changes(inputs, snapshot):
+    kind = inputs['scenario_type']
+    if kind == 'drone_offline':
+        return {'offline_drone_ids': [inputs['drone_id']]}
+    if kind == 'deadline_missed':
+        return {'deadline_overrides': {inputs['delivery_id']: inputs['deadline']}}
+    if kind == 'corridor_unavailable':
+        return {'blocked_corridor_ids': [inputs['corridor_id']]}
+    if kind == 'range_limit':
+        return {'range_budgets': {inputs['drone_id']: inputs['remaining_range_km']}}
+    if kind == 'mission_infeasible':
+        return {'forced_infeasible_delivery': {
+            'delivery_id': inputs['delivery_id'],
+            'reason': inputs['reason'],
+        }}
+    if kind == 'high_priority_delivery':
+        return {'new_delivery': {
+            'delivery_id': inputs['delivery_id'],
+            'drone_id': None,
+            'status': 'CREATED',
+            'pickup': inputs['pickup'],
+            'destination': inputs['destination'],
+            'planned_route_km': inputs['planned_route_km'],
+            'actual_observed_km': 0,
+            'priority': 'high',
+            'deadline': inputs.get('deadline'),
+        }}
+    if kind == 'shared_corridor':
+        return {}
+    raise ValueError('Unsupported scenario type.')
+
+
+def _scenario_explanations(inputs, affected, proposed):
+    kind = inputs['scenario_type']
+    if kind == 'drone_offline':
+        explanation = f"Drone {inputs['drone_id']} was marked offline only in the isolated baseline copy."
+    elif kind == 'deadline_missed':
+        explanation = f"Delivery {inputs['delivery_id']} uses the hypothetical missed deadline provided in this scenario."
+    elif kind == 'corridor_unavailable':
+        explanation = f"Virtual corridor {inputs['corridor_id']} is blocked for the hypothetical direct-segment checks."
+    elif kind == 'range_limit':
+        explanation = f"Drone {inputs['drone_id']} uses a scenario-only remaining range budget."
+    elif kind == 'shared_corridor':
+        explanation = 'Two virtual drones approach a shared virtual corridor; no live drone state or GPS was changed.'
+    elif kind == 'mission_infeasible':
+        explanation = f"Delivery {inputs['delivery_id']} receives the explicitly supplied hypothetical infeasibility constraint."
+    else:
+        explanation = f"Hypothetical high-priority delivery {inputs['delivery_id']} competes for current eligible demonstration drones; it is not inserted into live delivery records."
+    return [explanation] + [
+        f"{delivery_id} is affected by the changed eligibility, deadline, range or virtual-route constraint."
+        for delivery_id in affected
+    ] + [
+        f"{item['delivery_id']} has no feasible assignment: {item['reason']}"
+        for item in proposed['unassigned_deliveries']
+    ]
+
+
+def _scenario_row(scenario_id):
+    conn = store.get_connection()
+    try:
+        return conn.execute('SELECT * FROM simulation_runs WHERE scenario_id = ?', (scenario_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _safe_json_object(value):
+    try:
+        result = json.loads(value or '{}')
+        return result if isinstance(result, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _valid_coordinate(latitude, longitude):
+    try:
+        lat, lng = float(latitude), float(longitude)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lat) and math.isfinite(lng) and -90 <= lat <= 90 and -180 <= lng <= 180
+
+
+def _parse_replay_time(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_utc(value):
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def _fleet_payload():
@@ -975,18 +1737,6 @@ def _validate_twin_config(data):
     }, None
 
 
-def _authorize_admin(headers):
-    configured = os.getenv('STORMPILOT_ADMIN_TOKEN', '').strip()
-    if not configured:
-        return 503, {'error': 'Administrator authorization is not configured on this server.'}
-    if len(configured.encode('utf-8')) < 32:
-        return 503, {'error': 'Administrator authorization requires a server token of at least 32 bytes.'}
-    presented = _extract_admin_bearer_token(headers)
-    if not presented or not hmac.compare_digest(configured, presented):
-        return 401, {'error': 'Administrator authorization required.'}
-    return None
-
-
 def _handle_telemetry(body, headers=None):
     _prune_expired_telemetry_if_due()
     data = _read_json(body)
@@ -1252,7 +2002,7 @@ def _handle_device_revoke(body):
         conn.close()
 
 
-def _handle_delivery_confirm(body):
+def _handle_delivery_confirm(body, confirmed_by):
     data = _read_json(body)
     if not isinstance(data, dict):
         return 400, {'error': 'Invalid delivery confirmation payload.'}
@@ -1275,7 +2025,6 @@ def _handle_delivery_confirm(body):
             return 409, {'error': 'Delivery handover can only be confirmed after arrival.'}
 
         timestamp = _utc_now()
-        confirmed_by = 'authorized_administrator'
         with conn:
             changed = conn.execute(
                 """
@@ -1497,18 +2246,6 @@ def _extract_bearer_token(headers):
     if token.lower().startswith('bearer '):
         return token.split(None, 1)[1].strip()
     return token.strip() or None
-
-
-def _extract_admin_bearer_token(headers):
-    if not headers:
-        return None
-    auth = headers.get('Authorization') or headers.get('authorization')
-    if not auth:
-        return None
-    scheme, separator, token = str(auth).strip().partition(' ')
-    if separator and scheme.lower() == 'bearer' and token.strip():
-        return token.strip()
-    return None
 
 
 def _authenticate_device(device_id, token):

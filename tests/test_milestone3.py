@@ -15,10 +15,10 @@ from app import api
 from app import db as store
 from app.server import Handler
 from app.wsgi import application
+from support import create_authenticated_user
 
 
 class MilestoneThreeTests(unittest.TestCase):
-    ADMIN_TOKEN = 'milestone-three-test-admin-token'
 
     @classmethod
     def setUpClass(cls):
@@ -36,20 +36,21 @@ class MilestoneThreeTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix='stormpilot_m3_')
         self.original_data_dir = os.environ.get('APP_DATA_DIR')
-        self.original_admin_token = os.environ.get('STORMPILOT_ADMIN_TOKEN')
+        self.original_cookie_secure = os.environ.get('STORMPILOT_COOKIE_SECURE')
         os.environ['APP_DATA_DIR'] = self.temp_dir
-        os.environ['STORMPILOT_ADMIN_TOKEN'] = self.ADMIN_TOKEN
+        os.environ['STORMPILOT_COOKIE_SECURE'] = 'false'
         api.initialize_storage(force_reset=True)
+        self.admin_session = create_authenticated_user()
 
     def tearDown(self):
         if self.original_data_dir is None:
             os.environ.pop('APP_DATA_DIR', None)
         else:
             os.environ['APP_DATA_DIR'] = self.original_data_dir
-        if self.original_admin_token is None:
-            os.environ.pop('STORMPILOT_ADMIN_TOKEN', None)
+        if self.original_cookie_secure is None:
+            os.environ.pop('STORMPILOT_COOKIE_SECURE', None)
         else:
-            os.environ['STORMPILOT_ADMIN_TOKEN'] = self.original_admin_token
+            os.environ['STORMPILOT_COOKIE_SECURE'] = self.original_cookie_secure
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def request(self, method, path, payload=None, headers=None):
@@ -66,7 +67,7 @@ class MilestoneThreeTests(unittest.TestCase):
 
     @property
     def admin_headers(self):
-        return {'Authorization': f'Bearer {self.ADMIN_TOKEN}'}
+        return self.admin_session.copy()
 
     def register(self, device_id, drone_id):
         status, response = self.request(
@@ -112,25 +113,17 @@ class MilestoneThreeTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_admin_mutations_fail_closed_when_secret_is_not_configured(self):
-        with patch.dict(os.environ, {'STORMPILOT_ADMIN_TOKEN': ''}):
+    def test_legacy_shared_token_does_not_authorize_privileged_actions(self):
+        legacy_token = 'legacy-shared-token-that-must-not-authorize'
+        with patch.dict(os.environ, {'STORMPILOT_ADMIN_TOKEN': legacy_token}):
             status, payload = self.request(
                 'POST',
                 '/api/device/register',
-                {'device_id': 'phone-unconfigured', 'drone_id': 'SP-DRONE-01'},
+                {'device_id': 'phone-legacy-admin', 'drone_id': 'SP-DRONE-01'},
+                {'Authorization': f'Bearer {legacy_token}'},
             )
-        self.assertEqual(status, 503)
-        self.assertIn('not configured', payload['error'])
-
-    def test_admin_mutations_reject_short_configured_secret(self):
-        with patch.dict(os.environ, {'STORMPILOT_ADMIN_TOKEN': 'weak'}):
-            status, payload = self.request(
-                'POST',
-                '/api/device/register',
-                {'device_id': 'phone-weak-admin', 'drone_id': 'SP-DRONE-01'},
-            )
-        self.assertEqual(status, 503)
-        self.assertIn('32 bytes', payload['error'])
+        self.assertEqual(status, 401)
+        self.assertIn('login', payload['error'].lower())
 
     def test_admin_device_actions_are_audited_and_phone_telemetry_still_works(self):
         token = self.register('phone-admin-audit', 'SP-DRONE-01')
@@ -408,7 +401,7 @@ class MilestoneThreeTests(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(row['status'], 'DELIVERED')
-        self.assertEqual(row['handover_confirmed_by'], 'authorized_administrator')
+        self.assertEqual(row['handover_confirmed_by'], 'test-admin')
         self.assertIsNotNone(outbox)
 
     def test_wsgi_passes_authorization_and_query_to_api(self):
@@ -428,7 +421,7 @@ class MilestoneThreeTests(unittest.TestCase):
         self.assertEqual(headers['status'], '200 OK')
         self.assertEqual(json.loads(response)['window_hours'], 6)
 
-    def test_wsgi_forwards_admin_bearer_for_device_enrollment(self):
+    def test_wsgi_forwards_cookie_and_csrf_for_device_enrollment(self):
         body = json.dumps({
             'device_id': 'phone-wsgi-admin',
             'drone_id': 'SP-DRONE-04',
@@ -439,7 +432,8 @@ class MilestoneThreeTests(unittest.TestCase):
             'PATH_INFO': '/api/device/register',
             'QUERY_STRING': '',
             'CONTENT_LENGTH': str(len(body)),
-            'HTTP_AUTHORIZATION': f'Bearer {self.ADMIN_TOKEN}',
+            'HTTP_COOKIE': self.admin_session['Cookie'],
+            'HTTP_X_CSRF_TOKEN': self.admin_session['X-CSRF-Token'],
             'wsgi.input': BytesIO(body),
         }
 

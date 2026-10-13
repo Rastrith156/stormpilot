@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from app import api
 from app.server import Handler
+from support import create_authenticated_user
 
 
 class FleetTests(unittest.TestCase):
@@ -30,14 +31,21 @@ class FleetTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix='stormpilot_fleet_')
         self.original_data_dir = os.environ.get('APP_DATA_DIR')
+        self.original_cookie_secure = os.environ.get('STORMPILOT_COOKIE_SECURE')
         os.environ['APP_DATA_DIR'] = self.temp_dir
+        os.environ['STORMPILOT_COOKIE_SECURE'] = 'false'
         api.initialize_storage(force_reset=True)
+        self.admin_session = create_authenticated_user()
 
     def tearDown(self):
         if self.original_data_dir is None:
             os.environ.pop('APP_DATA_DIR', None)
         else:
             os.environ['APP_DATA_DIR'] = self.original_data_dir
+        if self.original_cookie_secure is None:
+            os.environ.pop('STORMPILOT_COOKIE_SECURE', None)
+        else:
+            os.environ['STORMPILOT_COOKIE_SECURE'] = self.original_cookie_secure
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def request(self, method, path, payload=None, headers=None):
@@ -80,21 +88,18 @@ class FleetTests(unittest.TestCase):
         )
         for status_name in ('ASSIGNED', 'PICKUP_CONFIRMED', 'IN_TRANSIT', 'ARRIVED'):
             api.update_delivery_status('DEL-1001', status_name)
-        admin_token = 'milestone-three-test-admin-token-for-tests'
-        admin = {'Authorization': f'Bearer {admin_token}'}
-        with patch.dict(os.environ, {'STORMPILOT_ADMIN_TOKEN': admin_token}):
-            first = self.request('POST', '/api/delivery/confirm', {
-                'delivery_id': 'DEL-1001',
-                'drone_id': 'SP-DRONE-01',
-                'confirmed_by': 'operator.demo',
-                'handover_confirmed': True
-            }, headers=admin)
-            second = self.request('POST', '/api/delivery/confirm', {
-                'delivery_id': 'DEL-1001',
-                'drone_id': 'SP-DRONE-01',
-                'confirmed_by': 'operator.demo',
-                'handover_confirmed': True
-            }, headers=admin)
+        first = self.request('POST', '/api/delivery/confirm', {
+            'delivery_id': 'DEL-1001',
+            'drone_id': 'SP-DRONE-01',
+            'confirmed_by': 'operator.demo',
+            'handover_confirmed': True
+        }, headers=self.admin_session)
+        second = self.request('POST', '/api/delivery/confirm', {
+            'delivery_id': 'DEL-1001',
+            'drone_id': 'SP-DRONE-01',
+            'confirmed_by': 'operator.demo',
+            'handover_confirmed': True
+        }, headers=self.admin_session)
         self.assertEqual(first[0], 200)
         self.assertEqual(second[0], 200)
         self.assertEqual(second[1]['status'], 'already_confirmed')

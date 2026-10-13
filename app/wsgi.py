@@ -13,6 +13,7 @@ def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', 'GET')
     path = environ.get('PATH_INFO', '/') or '/'
     status = 200
+    response_headers = []
     headers = [('X-Content-Type-Options', 'nosniff'),
                ('X-Frame-Options', 'DENY'),
                ('Referrer-Policy', 'strict-origin-when-cross-origin')]
@@ -33,9 +34,15 @@ def application(environ, start_response):
             method,
             path,
             body,
-            headers={'Authorization': environ.get('HTTP_AUTHORIZATION', '')},
+            headers={
+                'Authorization': environ.get('HTTP_AUTHORIZATION', ''),
+                'Cookie': environ.get('HTTP_COOKIE', ''),
+                'X-CSRF-Token': environ.get('HTTP_X_CSRF_TOKEN', ''),
+                'X-Client-IP': environ.get('REMOTE_ADDR', ''),
+            },
             query=environ.get('QUERY_STRING', ''),
         )
+        response_headers = payload.pop('_response_headers', []) if isinstance(payload, dict) else []
         content_type = 'application/json'
         _count('api', status)
     elif path in ('/healthz', '/readyz'):
@@ -73,6 +80,7 @@ def application(environ, start_response):
     headers.extend([('Content-Type', content_type), ('Content-Length', str(len(body_bytes)))])
     if path.startswith('/api/'):
         headers.append(('Cache-Control', 'no-store'))
+        headers.extend(response_headers)
     phrase = HTTPStatus(status).phrase
     start_response(f'{status} {phrase}', headers)
     return [body_bytes]
