@@ -8,11 +8,13 @@ import secrets
 import smtplib
 import sqlite3
 import ssl
+import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 try:
@@ -20,87 +22,82 @@ try:
 except ImportError:  # pragma: no cover
     import db as store
 
+DRONE_COLORS = ('#2dd4bf', '#a78bfa', '#fbbf24', '#4ade80')
 DEMO_DRONES = [
-    {
-        'drone_id': 'SP-DRONE-01',
-        'color': '#2dd4bf',
-        'operation_mode': 'SIMULATED',
-        'status': 'online',
-        'position': {'latitude': 43.6562, 'longitude': -79.3795},
-        'source': 'SIMULATED',
-        'heading': 32,
-        'accuracy_m': 12,
-        'last_update': '2026-10-13T12:00:00Z',
-        'mission': 'DEL-1001',
-        'destination': 'Toronto City Hall',
-        'planned_route_km': 7.4,
-        'actual_distance_km': 2.8,
-        'remaining_distance_km': 4.6,
-        'battery_pct': 82,
-        'delivery_status': 'IN_TRANSIT',
-    },
-    {
-        'drone_id': 'SP-DRONE-02',
-        'color': '#a78bfa',
-        'operation_mode': 'PHONE_GPS',
-        'status': 'tracking',
-        'position': {'latitude': 43.6521, 'longitude': -79.3834},
-        'source': 'PHONE_GPS',
-        'heading': 120,
-        'accuracy_m': 9,
-        'last_update': '2026-10-13T12:00:12Z',
-        'mission': 'DEL-1002',
-        'destination': 'Distillery District',
-        'planned_route_km': 6.1,
-        'actual_distance_km': 3.1,
-        'remaining_distance_km': 3.0,
-        'battery_pct': 76,
-        'delivery_status': 'ASSIGNED',
-    },
-    {
-        'drone_id': 'SP-DRONE-03',
-        'color': '#fbbf24',
-        'operation_mode': 'SIMULATED',
-        'status': 'staged',
-        'position': {'latitude': 43.6474, 'longitude': -79.3915},
-        'source': 'SIMULATED',
-        'heading': 214,
-        'accuracy_m': 15,
-        'last_update': '2026-10-13T11:58:56Z',
-        'mission': 'DEL-1003',
-        'destination': "Ripley's Aquarium",
-        'planned_route_km': 8.1,
-        'actual_distance_km': 1.9,
-        'remaining_distance_km': 6.2,
-        'battery_pct': 91,
-        'delivery_status': 'CREATED',
-    },
-    {
-        'drone_id': 'SP-DRONE-04',
-        'color': '#4ade80',
-        'operation_mode': 'OFFLINE',
-        'status': 'offline',
-        'position': {'latitude': 43.6408, 'longitude': -79.4001},
-        'source': 'OFFLINE',
-        'heading': 0,
-        'accuracy_m': None,
-        'last_update': '2026-10-13T11:45:00Z',
-        'mission': 'DEL-1004',
-        'destination': 'Union Station',
-        'planned_route_km': 9.3,
-        'actual_distance_km': 0.0,
-        'remaining_distance_km': 9.3,
-        'battery_pct': None,
-        'delivery_status': 'FAILED',
-    },
+    {'drone_id': f'SP-DRONE-{number:02d}', 'color': color}
+    for number, color in enumerate(DRONE_COLORS, start=1)
 ]
-
-TELEMETRY_STORE = {}
+STALE_AFTER_SECONDS = 120
+MAX_TRAFFIC_SAMPLES = 5000
+MAX_PATH_POINTS = 100
 RATE_LIMITS = {}
+_RETENTION_LOCK = threading.Lock()
+_LAST_RETENTION_PRUNE = 0.0
+DEFAULT_TWIN_CONFIG = {
+    'corridors': [{
+        'id': 'CORRIDOR-CENTRAL',
+        'name': 'Virtual central corridor',
+        'path': [
+            {'lat': 43.6500, 'lng': -79.3900},
+            {'lat': 43.6520, 'lng': -79.3860},
+            {'lat': 43.6540, 'lng': -79.3820},
+        ],
+    }],
+    'zones': [{
+        'id': 'ZONE-DEMO-01',
+        'name': 'Operator demonstration zone',
+        'center': {'lat': 43.6520, 'lng': -79.3860},
+        'radius_m': 220,
+    }],
+    'restrictions': [{
+        'zone_id': 'ZONE-DEMO-01',
+        'restricted': True,
+        'reason': 'Virtual scenario restriction; not an official aviation restriction.',
+    }],
+    'scenarios': [{
+        'id': 'SHARED-CORRIDOR-DEMO',
+        'name': 'Two virtual routes approaching a shared corridor',
+        'routes': [
+            {
+                'drone_id': 'VIRTUAL-01',
+                'path': [
+                    {'lat': 43.6480, 'lng': -79.3920},
+                    {'lat': 43.6500, 'lng': -79.3900},
+                    {'lat': 43.6520, 'lng': -79.3860},
+                ],
+            },
+            {
+                'drone_id': 'VIRTUAL-02',
+                'path': [
+                    {'lat': 43.6560, 'lng': -79.3800},
+                    {'lat': 43.6540, 'lng': -79.3820},
+                    {'lat': 43.6520, 'lng': -79.3860},
+                ],
+            },
+        ],
+    }],
+}
 
 
 def get_storage_path():
     return store.get_storage_path()
+
+
+def _prune_expired_telemetry_if_due(force=False):
+    global _LAST_RETENTION_PRUNE
+    now = time.monotonic()
+    with _RETENTION_LOCK:
+        if not force and now - _LAST_RETENTION_PRUNE < 3600:
+            return
+        configured = os.getenv('DATA_RETENTION_DAYS', '30').strip()
+        try:
+            retention_days = int(configured)
+        except ValueError as error:
+            raise ValueError('DATA_RETENTION_DAYS must be an integer from 1 to 3650.') from error
+        if not 1 <= retention_days <= 3650:
+            raise ValueError('DATA_RETENTION_DAYS must be an integer from 1 to 3650.')
+        store.prune_expired_telemetry(retention_days)
+        _LAST_RETENTION_PRUNE = now
 
 
 def list_tables():
@@ -110,6 +107,7 @@ def list_tables():
 def initialize_storage(force_reset=False):
     store.initialize_storage(force_reset=force_reset)
     _bootstrap_demo_drones()
+    _prune_expired_telemetry_if_due(force=True)
     return get_storage_path()
 
 
@@ -121,29 +119,10 @@ def _bootstrap_demo_drones():
                 '''
                 INSERT INTO drone_registrations (
                     drone_id, device_id, source, latitude, longitude, gps_accuracy, last_update, status, mission_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(drone_id) DO UPDATE SET
-                    device_id = excluded.device_id,
-                    source = excluded.source,
-                    latitude = excluded.latitude,
-                    longitude = excluded.longitude,
-                    gps_accuracy = excluded.gps_accuracy,
-                    last_update = excluded.last_update,
-                    status = excluded.status,
-                    mission_id = excluded.mission_id,
-                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                ) VALUES (?, NULL, 'OFFLINE', NULL, NULL, NULL, NULL, 'OFFLINE', NULL)
+                ON CONFLICT(drone_id) DO NOTHING
                 ''',
-                (
-                    drone['drone_id'],
-                    None,
-                    drone.get('source', 'SIMULATED'),
-                    drone['position']['latitude'],
-                    drone['position']['longitude'],
-                    drone.get('accuracy_m'),
-                    drone.get('last_update'),
-                    drone.get('status', 'online'),
-                    drone.get('mission'),
-                ),
+                (drone['drone_id'],),
             )
         conn.commit()
     finally:
@@ -304,7 +283,7 @@ def record_delivery_confirmation(delivery_id, drone_id, confirmed_by='operator',
         conn.close()
 
 
-def handle(method, path, body=None, headers=None):
+def handle(method, path, body=None, headers=None, query=''):
     if method == 'GET' and path == '/api/config':
         return 200, {
             'google_maps_api_key': os.getenv('GOOGLE_MAPS_API_KEY', '').strip(),
@@ -315,16 +294,37 @@ def handle(method, path, body=None, headers=None):
     if method == 'GET' and path == '/api/fleet':
         return 200, _fleet_payload()
 
+    if method == 'GET' and path == '/api/traffic':
+        return _traffic_payload(query)
+
+    if method == 'GET' and path == '/api/twin':
+        return _twin_payload()
+
+    if method == 'PUT' and path == '/api/twin/config':
+        authorization = _authorize_admin(headers)
+        if authorization is not None:
+            return authorization
+        return _save_twin_config(body)
+
     if method == 'POST' and path == '/api/device/register':
+        authorization = _authorize_admin(headers)
+        if authorization is not None:
+            return authorization
         return _handle_device_register(body)
 
     if method == 'DELETE' and path == '/api/device/revoke':
+        authorization = _authorize_admin(headers)
+        if authorization is not None:
+            return authorization
         return _handle_device_revoke(body)
 
     if method == 'POST' and path == '/api/device/telemetry':
         return _handle_telemetry(body, headers=headers)
 
     if method == 'POST' and path == '/api/delivery/confirm':
+        authorization = _authorize_admin(headers)
+        if authorization is not None:
+            return authorization
         return _handle_delivery_confirm(body)
 
     if method == 'POST' and path == '/api/email/test':
@@ -340,31 +340,655 @@ def handle(method, path, body=None, headers=None):
 
 
 def _fleet_payload():
+    _prune_expired_telemetry_if_due()
+    now = datetime.now(timezone.utc)
     drones = []
-    for drone in DEMO_DRONES:
-        current = dict(drone)
-        current['position'] = dict(drone['position'])
-        tracked = TELEMETRY_STORE.get(drone['drone_id'])
-        if tracked:
-            current['position'] = {'latitude': tracked['latitude'], 'longitude': tracked['longitude']}
-            current['source'] = tracked['source']
-            current['accuracy_m'] = tracked['accuracy_m']
-            current['last_update'] = tracked['last_update']
-            current['status'] = tracked['status']
-        drones.append(current)
+    conn = store.get_connection()
+    try:
+        for identity in DEMO_DRONES:
+            latest = conn.execute(
+                """
+                SELECT * FROM telemetry_samples
+                WHERE drone_id = ? AND status = 'ACCEPTED'
+                ORDER BY device_timestamp DESC, id DESC LIMIT 1
+                """,
+                (identity['drone_id'],),
+            ).fetchone()
+            path_rows = conn.execute(
+                """
+                SELECT latitude, longitude FROM telemetry_samples
+                WHERE drone_id = ? AND status = 'ACCEPTED'
+                ORDER BY device_timestamp DESC, id DESC LIMIT ?
+                """,
+                (identity['drone_id'], MAX_PATH_POINTS),
+            ).fetchall()
+            path_rows.reverse()
+
+            position = None
+            source = 'OFFLINE'
+            state = 'OFFLINE'
+            accuracy = None
+            last_update = None
+            if latest is not None:
+                source = 'PHONE_GPS'
+                state = 'PHONE_GPS' if _is_recent_sample(latest, now) else 'STALE'
+                position = {'latitude': latest['latitude'], 'longitude': latest['longitude']}
+                accuracy = latest['accuracy']
+                last_update = latest['device_timestamp']
+
+            distance = conn.execute(
+                """
+                SELECT COALESCE(SUM(CASE
+                    WHEN quality_flags IS NULL OR quality_flags NOT LIKE '%GPS_JUMP%'
+                    THEN COALESCE(distance_m, 0)
+                    ELSE 0 END), 0)
+                FROM telemetry_samples WHERE drone_id = ? AND status = 'ACCEPTED'
+                """,
+                (identity['drone_id'],),
+            ).fetchone()[0] or 0
+            delivery = conn.execute(
+                """
+                SELECT * FROM deliveries WHERE drone_id = ?
+                ORDER BY CASE WHEN status IN ('DELIVERED','CANCELLED','FAILED') THEN 1 ELSE 0 END,
+                         updated_at DESC LIMIT 1
+                """,
+                (identity['drone_id'],),
+            ).fetchone()
+            mission = None
+            if delivery is not None:
+                mission = {
+                    'delivery_id': delivery['delivery_id'],
+                    'status': delivery['status'],
+                    'pickup': _coordinate(delivery['pickup_lat'], delivery['pickup_lng']),
+                    'destination': _coordinate(delivery['destination_lat'], delivery['destination_lng']),
+                    'planned_distance_km': delivery['planned_route_km'],
+                    'actual_distance_km': round(float(delivery['actual_observed_km'] or 0), 3),
+                    'remaining_planned_distance_km': (
+                        round(max(0.0, float(delivery['planned_route_km']) - float(delivery['actual_observed_km'] or 0)), 3)
+                        if delivery['planned_route_km'] is not None else None
+                    ),
+                    'notification_status': delivery['notification_status'],
+                    'created_at': delivery['created_at'],
+                    'delivered_at': delivery['delivered_at'],
+                }
+
+            path = [
+                {'latitude': point['latitude'], 'longitude': point['longitude']}
+                for point in path_rows
+            ]
+            drones.append({
+                **identity,
+                'position': position,
+                'source': source,
+                'position_state': state,
+                'status': state,
+                'operation_mode': 'PHONE_GPS' if latest is not None else 'OFFLINE',
+                'accuracy_m': accuracy,
+                'last_update': last_update,
+                'last_received_at': latest['server_received_at'] if latest is not None else None,
+                'mission': mission['delivery_id'] if mission else None,
+                'delivery_id': mission['delivery_id'] if mission else None,
+                'delivery_status': mission['status'] if mission else None,
+                'pickup': mission['pickup'] if mission else None,
+                'destination': mission['destination'] if mission else None,
+                'planned_route_km': mission['planned_distance_km'] if mission else None,
+                'actual_distance_km': round(float(distance) / 1000.0, 3),
+                'delivery_actual_distance_km': mission['actual_distance_km'] if mission else None,
+                'remaining_distance_km': mission['remaining_planned_distance_km'] if mission else None,
+                'notification_status': mission['notification_status'] if mission else None,
+                'observed_path': path,
+                'gps_coverage_sufficient': bool(
+                    state == 'PHONE_GPS'
+                    and accuracy is not None
+                    and accuracy <= 25
+                    and len(path) >= 2
+                ),
+                'telemetry_origin': 'live' if state == 'PHONE_GPS' else ('historical' if latest is not None else None),
+            })
+
+        all_deliveries = conn.execute('SELECT * FROM deliveries ORDER BY updated_at DESC LIMIT 500').fetchall()
+        delivery_counts = {
+            row['status']: row['count']
+            for row in conn.execute('SELECT status, COUNT(*) AS count FROM deliveries GROUP BY status')
+        }
+        total_deliveries = sum(delivery_counts.values())
+        duration_row = conn.execute(
+            """
+            SELECT AVG((julianday(delivered_at) - julianday(created_at)) * 1440)
+            FROM deliveries WHERE status = 'DELIVERED' AND delivered_at IS NOT NULL
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    completed_count = delivery_counts.get('DELIVERED', 0)
     analytics = {
-        'active_drones': 2,
-        'active_deliveries': 2,
-        'completed_deliveries': 1,
-        'total_observed_distance_km': 18.7,
-        'average_delivery_duration_minutes': 44,
-        'delivery_success_rate': 0.86,
-        'traffic_density': 'moderate',
+        'active_drones': sum(1 for item in drones if item['position_state'] == 'PHONE_GPS'),
+        'active_deliveries': sum(
+            count for status, count in delivery_counts.items()
+            if status not in {'DELIVERED', 'CANCELLED', 'FAILED'}
+        ),
+        'completed_deliveries': completed_count,
+        'total_observed_distance_km': round(sum(item['actual_distance_km'] for item in drones), 3),
+        'average_delivery_duration_minutes': round(duration_row[0], 1) if duration_row[0] is not None else None,
+        'delivery_success_rate': (
+            round(completed_count / total_deliveries, 3)
+            if total_deliveries else None
+        ),
+        'gps_origin': 'live' if any(item['position_state'] == 'PHONE_GPS' for item in drones) else 'historical',
+        'delivery_origin': 'live' if any(
+            _parse_timestamp(row['updated_at'])
+            and (now - _parse_timestamp(row['updated_at'])).total_seconds() <= STALE_AFTER_SECONDS
+            for row in all_deliveries
+        ) else 'historical',
+        'distance_origin': 'historical',
+        'traffic_density': 'not_available',
+        'data_origin': 'historical',
     }
-    return {'drones': drones, 'analytics': analytics}
+    return {
+        'drones': drones,
+        'deliveries': [_delivery_summary(row) for row in all_deliveries],
+        'analytics': analytics,
+    }
+
+
+def _parse_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_recent_sample(sample, now):
+    received = _parse_timestamp(sample['server_received_at'])
+    device_time = _parse_timestamp(sample['device_timestamp'])
+    if received is None or device_time is None:
+        return False
+    received_age = (now - received).total_seconds()
+    device_age = (now - device_time).total_seconds()
+    return (
+        received_age <= STALE_AFTER_SECONDS
+        and device_age <= STALE_AFTER_SECONDS
+        and received_age >= -30
+        and device_age >= -30
+    )
+
+
+def _coordinate(latitude, longitude):
+    if latitude is None or longitude is None:
+        return None
+    return {'lat': latitude, 'lng': longitude}
+
+
+def _delivery_summary(row):
+    updated = _parse_timestamp(row['updated_at'])
+    origin = (
+        'live'
+        if updated and (datetime.now(timezone.utc) - updated).total_seconds() <= STALE_AFTER_SECONDS
+        else 'historical'
+    )
+    return {
+        'delivery_id': row['delivery_id'],
+        'drone_id': row['drone_id'],
+        'status': row['status'],
+        'pickup': _coordinate(row['pickup_lat'], row['pickup_lng']),
+        'destination': _coordinate(row['destination_lat'], row['destination_lng']),
+        'planned_distance_km': row['planned_route_km'],
+        'actual_distance_km': round(float(row['actual_observed_km'] or 0), 3),
+        'notification_status': row['notification_status'],
+        'created_at': row['created_at'],
+        'updated_at': row['updated_at'],
+        'delivered_at': row['delivered_at'],
+        'origin': origin,
+    }
+
+
+def _traffic_payload(query):
+    _prune_expired_telemetry_if_due()
+    params = parse_qs(query or '', keep_blank_values=True)
+    window_text = params.get('window_hours', ['24'])[0]
+    try:
+        window_hours = int(window_text)
+    except (TypeError, ValueError):
+        return 400, {'error': 'window_hours must be one of 1, 6, 24 or 168.'}
+    if window_hours not in {1, 6, 24, 168}:
+        return 400, {'error': 'window_hours must be one of 1, 6, 24 or 168.'}
+
+    drone_id = params.get('drone_id', [''])[0].strip()
+    if drone_id and drone_id not in {drone['drone_id'] for drone in DEMO_DRONES}:
+        return 400, {'error': 'Unknown drone_id filter.'}
+    source_filter = params.get('source', ['ALL'])[0].upper()
+    if source_filter not in {'ALL', 'PHONE_GPS'}:
+        return 400, {'error': 'source must be ALL or PHONE_GPS.'}
+    cell_size_text = params.get('cell_size_deg', ['0.01'])[0]
+    try:
+        cell_size = float(cell_size_text)
+    except (TypeError, ValueError):
+        return 400, {'error': 'cell_size_deg must be 0.005, 0.01 or 0.02.'}
+    if cell_size not in {0.005, 0.01, 0.02}:
+        return 400, {'error': 'cell_size_deg must be 0.005, 0.01 or 0.02.'}
+    mission_id = params.get('mission', [''])[0].strip()
+
+    clauses = ["t.status = 'ACCEPTED'", "datetime(t.device_timestamp) >= datetime('now', ?)"]
+    values = [f'-{window_hours} hours']
+    if drone_id:
+        clauses.append('t.drone_id = ?')
+        values.append(drone_id)
+    if source_filter != 'ALL':
+        clauses.append('t.source = ?')
+        values.append(source_filter)
+    if mission_id:
+        clauses.append(
+            "t.drone_id = (SELECT d.drone_id FROM deliveries d WHERE d.delivery_id = ? LIMIT 1)"
+        )
+        values.append(mission_id)
+
+    conn = store.get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT t.id, t.drone_id, t.latitude, t.longitude, t.accuracy,
+                   t.device_timestamp, t.server_received_at, t.source
+            FROM telemetry_samples t WHERE {' AND '.join(clauses)}
+            ORDER BY t.device_timestamp DESC, t.id DESC LIMIT ?
+            """,
+            (*values, MAX_TRAFFIC_SAMPLES),
+        ).fetchall()
+        deliveries = conn.execute(
+            'SELECT * FROM deliveries ORDER BY updated_at DESC LIMIT 500'
+        ).fetchall()
+    finally:
+        conn.close()
+
+    selected_deliveries = [
+        _delivery_summary(row) for row in deliveries
+        if (not drone_id or row['drone_id'] == drone_id)
+        and (not mission_id or row['delivery_id'] == mission_id)
+    ]
+    cells = defaultdict(lambda: {
+        'samples': 0,
+        'drones': set(),
+        'newest_received': None,
+        'newest_sample': None,
+    })
+    paths = defaultdict(list)
+    path_latest_sample = {}
+    newest_received = None
+    newest_sample = None
+    now = datetime.now(timezone.utc)
+    for row in reversed(rows):
+        key = (
+            round(round(row['latitude'] / cell_size) * cell_size, 5),
+            round(round(row['longitude'] / cell_size) * cell_size, 5),
+        )
+        cells[key]['samples'] += 1
+        cells[key]['drones'].add(row['drone_id'])
+        received_at = _parse_timestamp(row['server_received_at'])
+        if received_at and (
+            cells[key]['newest_received'] is None or received_at > cells[key]['newest_received']
+        ):
+            cells[key]['newest_received'] = received_at
+            cells[key]['newest_sample'] = row
+        path = paths[row['drone_id']]
+        if len(path) >= MAX_PATH_POINTS:
+            path.pop(0)
+        path.append({
+            'lat': row['latitude'],
+            'lng': row['longitude'],
+        })
+        path_latest = path_latest_sample.get(row['drone_id'])
+        if (
+            received_at
+            and (
+                path_latest is None
+                or received_at > _parse_timestamp(path_latest['server_received_at'])
+            )
+        ):
+            path_latest_sample[row['drone_id']] = row
+        if received_at and (newest_received is None or received_at > newest_received):
+            newest_received = received_at
+            newest_sample = row
+
+    origin = 'live' if newest_sample and _is_recent_sample(newest_sample, now) else 'historical'
+    cell_rows = [
+        {
+            'latitude': key[0],
+            'longitude': key[1],
+            'sample_count': value['samples'],
+            'drone_count': len(value['drones']),
+            'origin': (
+                'live'
+                if value['newest_sample'] and _is_recent_sample(value['newest_sample'], now)
+                else 'historical'
+            ),
+        }
+        for key, value in sorted(cells.items(), key=lambda item: item[1]['samples'], reverse=True)
+    ]
+    overlap_cells = [cell for cell in cell_rows if cell['drone_count'] > 1]
+    path_crossings = []
+    for index, first in enumerate(paths):
+        for second in list(paths)[index + 1:]:
+            for point in _path_intersections(paths[first], paths[second]):
+                path_crossings.append({
+                    'latitude': point['lat'],
+                    'longitude': point['lng'],
+                    'drone_ids': [first, second],
+                    'kind': 'path_crossing',
+                    'origin': origin,
+                })
+    filtered_drones = {drone_id} if drone_id else {drone['drone_id'] for drone in DEMO_DRONES}
+    drone_distances = [
+        {
+            'drone_id': drone['drone_id'],
+            'distance_km': drone['actual_distance_km'],
+            'origin': 'historical',
+        }
+        for drone in _fleet_payload()['drones']
+        if drone['drone_id'] in filtered_drones
+    ]
+    return 200, {
+        'window_hours': window_hours,
+        'cell_size_deg': cell_size,
+        'origin': origin,
+        'source': 'PHONE_GPS',
+        'sample_count': len(rows),
+        'sample_limit': MAX_TRAFFIC_SAMPLES,
+        'cells': cell_rows,
+        'overlapping_cells': overlap_cells,
+        'path_crossings': path_crossings,
+        'observed_paths': [
+            {
+                'drone_id': identity,
+                'path': path,
+                'origin': (
+                    'live'
+                    if path_latest_sample.get(identity)
+                    and _is_recent_sample(path_latest_sample[identity], now)
+                    else 'historical'
+                ),
+            }
+            for identity, path in paths.items() if len(path) > 1
+        ],
+        'distance_per_drone': drone_distances,
+        'deliveries': selected_deliveries,
+        'delivery_counts': {
+            'active': sum(1 for delivery in selected_deliveries if delivery['status'] not in {'DELIVERED', 'CANCELLED', 'FAILED'}),
+            'completed': sum(1 for delivery in selected_deliveries if delivery['status'] == 'DELIVERED'),
+        },
+        'filters': {'drone_id': drone_id or None, 'mission': mission_id or None, 'source': source_filter},
+        'route_intersections': path_crossings + [
+            {
+                'latitude': cell['latitude'],
+                'longitude': cell['longitude'],
+                'drone_count': cell['drone_count'],
+                'kind': 'shared_grid_cell',
+                'origin': origin,
+            }
+            for cell in overlap_cells
+        ],
+    }
+
+
+def _twin_payload():
+    conn = store.get_connection()
+    try:
+        row = conn.execute(
+            'SELECT config_json, updated_at FROM digital_twin_config WHERE config_id = 1'
+        ).fetchone()
+    finally:
+        conn.close()
+    config = json.loads(row['config_json']) if row else DEFAULT_TWIN_CONFIG
+    intersections = []
+    for scenario in config['scenarios']:
+        for index, first in enumerate(scenario['routes']):
+            for second in scenario['routes'][index + 1:]:
+                for point in _path_intersections(first['path'], second['path']):
+                    intersections.append({
+                        'scenario_id': scenario['id'],
+                        'drone_ids': [first['drone_id'], second['drone_id']],
+                        'latitude': point['lat'],
+                        'longitude': point['lng'],
+                        'origin': 'simulated',
+                    })
+    return 200, {
+        **config,
+        'route_intersections': intersections,
+        'origin': 'simulated',
+        'updated_at': row['updated_at'] if row else None,
+        'warning': 'Virtual zones and routes are demonstrations, not official aviation restrictions or flight-safety guidance.',
+    }
+
+
+def _path_intersections(first_path, second_path):
+    points = []
+    epsilon = 1e-9
+
+    def on_segment(point, start, end):
+        x, y = point
+        x1, y1 = start
+        x2, y2 = end
+        cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+        return (
+            abs(cross) <= epsilon
+            and min(x1, x2) - epsilon <= x <= max(x1, x2) + epsilon
+            and min(y1, y2) - epsilon <= y <= max(y1, y2) + epsilon
+        )
+
+    def add_point(longitude, latitude):
+        if not any(
+            abs(point['lat'] - latitude) < epsilon and abs(point['lng'] - longitude) < epsilon
+            for point in points
+        ):
+            points.append({'lat': latitude, 'lng': longitude})
+
+    for first_start, first_end in zip(first_path, first_path[1:]):
+        for second_start, second_end in zip(second_path, second_path[1:]):
+            x1, y1 = first_start['lng'], first_start['lat']
+            x2, y2 = first_end['lng'], first_end['lat']
+            x3, y3 = second_start['lng'], second_start['lat']
+            x4, y4 = second_end['lng'], second_end['lat']
+            denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            if abs(denominator) < 1e-12:
+                first_line_cross = (x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)
+                if abs(first_line_cross) < epsilon:
+                    endpoints = ((x1, y1), (x2, y2), (x3, y3), (x4, y4))
+                    for longitude, latitude in endpoints:
+                        if on_segment((longitude, latitude), (x1, y1), (x2, y2)) and on_segment(
+                            (longitude, latitude), (x3, y3), (x4, y4)
+                        ):
+                            add_point(longitude, latitude)
+                continue
+            determinant1 = x1 * y2 - y1 * x2
+            determinant2 = x3 * y4 - y3 * x4
+            longitude = (determinant1 * (x3 - x4) - (x1 - x2) * determinant2) / denominator
+            latitude = (determinant1 * (y3 - y4) - (y1 - y2) * determinant2) / denominator
+            if (
+                min(x1, x2) - epsilon <= longitude <= max(x1, x2) + epsilon
+                and min(y1, y2) - epsilon <= latitude <= max(y1, y2) + epsilon
+                and min(x3, x4) - epsilon <= longitude <= max(x3, x4) + epsilon
+                and min(y3, y4) - epsilon <= latitude <= max(y3, y4) + epsilon
+            ):
+                add_point(longitude, latitude)
+    return points
+
+
+def _save_twin_config(body):
+    data = _read_json(body)
+    validated, error = _validate_twin_config(data)
+    if error:
+        return 400, {'error': error}
+    serialized = json.dumps(validated, separators=(',', ':'), sort_keys=True)
+    conn = store.get_connection()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO digital_twin_config(config_id, config_json, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(config_id) DO UPDATE SET
+                    config_json = excluded.config_json, updated_at = excluded.updated_at
+                """,
+                (serialized, _utc_now()),
+            )
+        store.record_event('TWIN_CONFIGURATION_UPDATED', 'DIGITAL_TWIN', 'configuration', {
+            'corridor_count': len(validated['corridors']),
+            'zone_count': len(validated['zones']),
+            'scenario_count': len(validated['scenarios']),
+        })
+    finally:
+        conn.close()
+    return _twin_payload()
+
+
+def _validate_twin_config(data):
+    if not isinstance(data, dict) or set(data) != {'corridors', 'zones', 'restrictions', 'scenarios'}:
+        return None, 'Configuration must contain corridors, zones, restrictions and scenarios.'
+    if any(not isinstance(data[key], list) or len(data[key]) > 25 for key in data):
+        return None, 'Configuration collections must be arrays with no more than 25 entries.'
+
+    def valid_id(value):
+        return isinstance(value, str) and value == value.strip() and 1 <= len(value) <= 64
+
+    def valid_path(path):
+        return (
+            isinstance(path, list) and 2 <= len(path) <= 200
+            and all(
+                isinstance(point, dict)
+                and _float(point.get('lat')) is not None
+                and _float(point.get('lng')) is not None
+                and math.isfinite(_float(point.get('lat')))
+                and math.isfinite(_float(point.get('lng')))
+                and -90 <= _float(point.get('lat')) <= 90
+                and -180 <= _float(point.get('lng')) <= 180
+                for point in path
+            )
+        )
+
+    corridors = data['corridors']
+    zones = data['zones']
+    restrictions = data['restrictions']
+    scenarios = data['scenarios']
+    if any(
+        not isinstance(item, dict) or not valid_id(item.get('id'))
+        or not valid_path(item.get('path'))
+        for item in corridors
+    ):
+        return None, 'Each corridor needs an ID and a path with 2-200 valid coordinates.'
+    if len({item['id'] for item in corridors}) != len(corridors):
+        return None, 'Corridor IDs must be unique.'
+    zone_ids = set()
+    for zone in zones:
+        center = zone.get('center') if isinstance(zone, dict) else None
+        radius = _float(zone.get('radius_m')) if isinstance(zone, dict) else None
+        if (
+            not isinstance(zone, dict) or not valid_id(zone.get('id'))
+            or not isinstance(center, dict)
+            or _float(center.get('lat')) is None or _float(center.get('lng')) is None
+            or not -90 <= _float(center.get('lat')) <= 90
+            or not -180 <= _float(center.get('lng')) <= 180
+            or radius is None or not 10 <= radius <= 5000
+        ):
+            return None, 'Each zone needs an ID, valid center and radius from 10 to 5000 metres.'
+        zone_ids.add(zone['id'])
+    if len(zone_ids) != len(zones):
+        return None, 'Zone IDs must be unique.'
+    if any(
+        not isinstance(item, dict) or item.get('zone_id') not in zone_ids
+        or not isinstance(item.get('restricted'), bool)
+        for item in restrictions
+    ):
+        return None, 'Restrictions must reference a configured zone and set restricted to a boolean.'
+    for scenario in scenarios:
+        if (
+            not isinstance(scenario, dict) or not valid_id(scenario.get('id'))
+            or not isinstance(scenario.get('routes'), list) or len(scenario['routes']) > 25
+            or any(
+                not isinstance(route, dict) or not valid_id(route.get('drone_id'))
+                or not valid_path(route.get('path'))
+                for route in scenario['routes']
+            )
+        ):
+            return None, 'Each scenario needs an ID and routes with valid drone IDs and paths.'
+    if len({item['id'] for item in scenarios}) != len(scenarios):
+        return None, 'Scenario IDs must be unique.'
+
+    def normalize_path(path):
+        return [{'lat': _float(point['lat']), 'lng': _float(point['lng'])} for point in path]
+
+    def normalize_name(item):
+        name = item.get('name', item['id'])
+        return name.strip() if isinstance(name, str) and 0 < len(name.strip()) <= 120 else None
+
+    normalized_corridors = []
+    for corridor in corridors:
+        name = normalize_name(corridor)
+        if name is None:
+            return None, 'Corridor names must be non-empty strings no longer than 120 characters.'
+        normalized_corridors.append({
+            'id': corridor['id'],
+            'name': name,
+            'path': normalize_path(corridor['path']),
+        })
+
+    normalized_zones = []
+    for zone in zones:
+        name = normalize_name(zone)
+        if name is None:
+            return None, 'Zone names must be non-empty strings no longer than 120 characters.'
+        normalized_zones.append({
+            'id': zone['id'],
+            'name': name,
+            'center': {'lat': _float(zone['center']['lat']), 'lng': _float(zone['center']['lng'])},
+            'radius_m': _float(zone['radius_m']),
+        })
+
+    normalized_restrictions = []
+    for restriction in restrictions:
+        reason = restriction.get('reason', 'Operator-defined virtual restriction')
+        if not isinstance(reason, str) or len(reason) > 500:
+            return None, 'Restriction reasons must be strings no longer than 500 characters.'
+        normalized_restrictions.append({
+            'zone_id': restriction['zone_id'],
+            'restricted': restriction['restricted'],
+            'reason': reason,
+        })
+
+    normalized_scenarios = []
+    for scenario in scenarios:
+        name = normalize_name(scenario)
+        if name is None:
+            return None, 'Scenario names must be non-empty strings no longer than 120 characters.'
+        normalized_scenarios.append({
+            'id': scenario['id'],
+            'name': name,
+            'routes': [{
+                'drone_id': route['drone_id'],
+                'path': normalize_path(route['path']),
+            } for route in scenario['routes']],
+        })
+    return {
+        'corridors': normalized_corridors,
+        'zones': normalized_zones,
+        'restrictions': normalized_restrictions,
+        'scenarios': normalized_scenarios,
+    }, None
+
+
+def _authorize_admin(headers):
+    configured = os.getenv('STORMPILOT_ADMIN_TOKEN', '').strip()
+    if not configured:
+        return 503, {'error': 'Administrator authorization is not configured on this server.'}
+    if len(configured.encode('utf-8')) < 32:
+        return 503, {'error': 'Administrator authorization requires a server token of at least 32 bytes.'}
+    presented = _extract_admin_bearer_token(headers)
+    if not presented or not hmac.compare_digest(configured, presented):
+        return 401, {'error': 'Administrator authorization required.'}
+    return None
 
 
 def _handle_telemetry(body, headers=None):
+    _prune_expired_telemetry_if_due()
     data = _read_json(body)
     if not isinstance(data, dict):
         return 400, {'error': 'Invalid GPS payload. Expected a JSON object.'}
@@ -535,15 +1159,6 @@ def _handle_telemetry(body, headers=None):
                     (f'delivery-arrival-{in_transit["delivery_id"]}-{now}', 'DELIVERY_ARRIVED', 'DELIVERY', in_transit['delivery_id'], json.dumps(arrival_evidence, separators=(',', ':'), sort_keys=True)),
                 )
         conn.commit()
-        TELEMETRY_STORE[drone_id] = {
-            'drone_id': drone_id,
-            'latitude': latitude,
-            'longitude': longitude,
-            'accuracy_m': accuracy_m,
-            'last_update': iso,
-            'source': 'PHONE_GPS',
-            'status': 'tracking',
-        }
         _record_rate_limit(device_id)
         store.record_event('TELEMETRY_ACCEPTED', 'DRONE', drone_id, {'device_id': device_id, 'accuracy_m': accuracy_m, 'distance_m': round(distance_m, 2), 'quality_flags': quality_flags})
         return 200, {'status': 'accepted', 'drone_id': drone_id, 'timestamp': iso, 'accuracy_m': accuracy_m, 'distance_m': round(distance_m, 2), 'arrival_detected': arrival_detected}
@@ -598,7 +1213,10 @@ def _handle_device_register(body):
             (device_id, drone_id, _utc_now(), _utc_now(), _utc_now(), _utc_now_plus_days(30)),
         )
         conn.commit()
-        store.record_event('DEVICE_REGISTERED', 'DEVICE', device_id, {'drone_id': drone_id})
+        store.record_event('DEVICE_REGISTERED', 'DEVICE', device_id, {
+            'drone_id': drone_id,
+            'actor': 'administrator',
+        })
     finally:
         conn.close()
     return 200, {'device_id': device_id, 'drone_id': drone_id, 'token': secret, 'status': 'active'}
@@ -613,10 +1231,22 @@ def _handle_device_revoke(body):
         return 400, {'error': 'Device ID is required.'}
     conn = store.get_connection()
     try:
-        conn.execute('UPDATE device_credentials SET status = ?, revoked_reason = ?, updated_at = ? WHERE device_id = ?', ('REVOKED', str(data.get('reason', 'revoked')).strip() or 'revoked', _utc_now(), device_id))
-        conn.execute('UPDATE device_registrations SET status = ?, revocation_reason = ?, updated_at = ? WHERE device_id = ?', ('revoked', str(data.get('reason', 'revoked')).strip() or 'revoked', _utc_now(), device_id))
+        reason = str(data.get('reason', 'revoked')).strip() or 'revoked'
+        credentials = conn.execute(
+            'UPDATE device_credentials SET status = ?, revoked_reason = ?, updated_at = ? WHERE device_id = ?',
+            ('REVOKED', reason, _utc_now(), device_id),
+        ).rowcount
+        registrations = conn.execute(
+            'UPDATE device_registrations SET status = ?, revocation_reason = ?, updated_at = ? WHERE device_id = ?',
+            ('revoked', reason, _utc_now(), device_id),
+        ).rowcount
+        if not credentials and not registrations:
+            return 404, {'error': 'Unknown device ID.'}
         conn.commit()
-        store.record_event('DEVICE_REVOKED', 'DEVICE', device_id, {'reason': str(data.get('reason', 'revoked')).strip() or 'revoked'})
+        store.record_event('DEVICE_REVOKED', 'DEVICE', device_id, {
+            'reason': reason,
+            'actor': 'administrator',
+        })
         return 200, {'status': 'revoked', 'device_id': device_id}
     finally:
         conn.close()
@@ -629,45 +1259,45 @@ def _handle_delivery_confirm(body):
 
     delivery_id = str(data.get('delivery_id', '')).strip()
     drone_id = str(data.get('drone_id', '')).strip()
-    if not delivery_id or not drone_id:
-        return 400, {'error': 'Delivery ID and drone ID are required.'}
+    if not delivery_id or not drone_id or data.get('handover_confirmed') is not True:
+        return 400, {'error': 'Delivery ID, drone ID and an explicit handover confirmation are required.'}
 
     conn = store.get_connection()
     try:
         existing = conn.execute('SELECT * FROM deliveries WHERE delivery_id = ?', (delivery_id,)).fetchone()
+        if existing is None:
+            return 404, {'error': 'Unknown delivery ID.'}
         if existing is not None and existing['drone_id'] != drone_id:
             return 409, {'error': 'Delivery is assigned to a different drone.'}
         if existing is not None and existing['handover_confirmed']:
             return 200, {'status': 'already_confirmed', 'delivery_id': delivery_id, 'drone_id': existing['drone_id']}
-        if data.get('handover_confirmed', False) and existing is not None and existing['status'] != 'ARRIVED':
+        if existing['status'] != 'ARRIVED':
             return 409, {'error': 'Delivery handover can only be confirmed after arrival.'}
 
         timestamp = _utc_now()
-        confirmed_by = str(data.get('confirmed_by', 'operator')).strip() or 'operator'
+        confirmed_by = 'authorized_administrator'
         with conn:
-            if existing is None:
-                conn.execute(
-                    'INSERT INTO deliveries (delivery_id, drone_id, status, created_at, updated_at, handover_confirmed_by) VALUES (?, ?, ?, ?, ?, ?)',
-                    (delivery_id, drone_id, 'CREATED', timestamp, timestamp, confirmed_by),
-                )
-                conn.execute(
-                    'INSERT INTO delivery_state_history (delivery_id, previous_status, new_status, reason, evidence) VALUES (?, ?, ?, ?, ?)',
-                    (delivery_id, None, 'CREATED', 'created_by_confirmation', '{}'),
-                )
-                previous_status = 'CREATED'
-            else:
-                previous_status = existing['status']
-
-            if data.get('handover_confirmed', False):
-                conn.execute(
-                    'UPDATE deliveries SET handover_confirmed = 1, handover_confirmed_by = ?, status = "DELIVERED", updated_at = ?, delivered_at = ? WHERE delivery_id = ?',
-                    (confirmed_by, timestamp, timestamp, delivery_id),
-                )
-                confirmation_evidence = {'drone_id': drone_id, 'confirmed_by': confirmed_by, 'handover_confirmed': True}
-                conn.execute(
-                    'INSERT INTO delivery_state_history (delivery_id, previous_status, new_status, reason, evidence) VALUES (?, ?, ?, ?, ?)',
-                    (delivery_id, previous_status, 'DELIVERED', 'handover_confirmed', json.dumps(confirmation_evidence, separators=(',', ':'), sort_keys=True)),
-                )
+            changed = conn.execute(
+                """
+                UPDATE deliveries SET handover_confirmed = 1, handover_confirmed_by = ?,
+                    status = 'DELIVERED', updated_at = ?, delivered_at = ?
+                WHERE delivery_id = ? AND drone_id = ? AND status = 'ARRIVED'
+                    AND handover_confirmed = 0
+                """,
+                (confirmed_by, timestamp, timestamp, delivery_id, drone_id),
+            ).rowcount
+            if not changed:
+                return 409, {'error': 'Delivery state changed; reload and confirm the current delivery state.'}
+            conn.execute(
+                'INSERT INTO delivery_state_history (delivery_id, previous_status, new_status, reason, evidence) VALUES (?, ?, ?, ?, ?)',
+                (
+                    delivery_id,
+                    'ARRIVED',
+                    'DELIVERED',
+                    'handover_confirmed',
+                    json.dumps({'drone_id': drone_id, 'confirmed_by': confirmed_by, 'handover_confirmed': True}, separators=(',', ':'), sort_keys=True),
+                ),
+            )
             conn.execute(
                 'INSERT INTO event_log (id, event_type, entity_type, entity_id, payload) VALUES (?, ?, ?, ?, ?)',
                 (
@@ -675,17 +1305,16 @@ def _handle_delivery_confirm(body):
                     'DELIVERY_CONFIRMED',
                     'DELIVERY',
                     delivery_id,
-                    json.dumps({'drone_id': drone_id, 'confirmed_by': confirmed_by, 'handover_confirmed': bool(data.get('handover_confirmed', False))}, separators=(',', ':'), sort_keys=True),
+                    json.dumps({'drone_id': drone_id, 'confirmed_by': confirmed_by, 'handover_confirmed': True}, separators=(',', ':'), sort_keys=True),
                 ),
             )
-            if data.get('handover_confirmed', False):
-                _enqueue_notification_on_connection(
-                    conn,
-                    'DELIVERY_COMPLETED',
-                    delivery_id,
-                    {'delivery_id': delivery_id, 'drone_id': drone_id},
-                    delivery_id,
-                )
+            _enqueue_notification_on_connection(
+                conn,
+                'DELIVERY_COMPLETED',
+                delivery_id,
+                {'delivery_id': delivery_id, 'drone_id': drone_id},
+                delivery_id,
+            )
         return 200, {'status': 'confirmed', 'delivery_id': delivery_id, 'drone_id': drone_id}
     except sqlite3.DatabaseError:
         return 500, {'error': 'Delivery confirmation storage is temporarily unavailable.'}
@@ -868,6 +1497,18 @@ def _extract_bearer_token(headers):
     if token.lower().startswith('bearer '):
         return token.split(None, 1)[1].strip()
     return token.strip() or None
+
+
+def _extract_admin_bearer_token(headers):
+    if not headers:
+        return None
+    auth = headers.get('Authorization') or headers.get('authorization')
+    if not auth:
+        return None
+    scheme, separator, token = str(auth).strip().partition(' ')
+    if separator and scheme.lower() == 'bearer' and token.strip():
+        return token.strip()
+    return None
 
 
 def _authenticate_device(device_id, token):

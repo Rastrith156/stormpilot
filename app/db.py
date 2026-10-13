@@ -220,6 +220,17 @@ def initialize_storage(force_reset=False):
 
                 CREATE INDEX IF NOT EXISTS idx_device_credentials_status ON device_credentials(status, drone_id);
                 '''
+            ),
+            (
+                3,
+                '003_digital_twin_configuration',
+                '''
+                CREATE TABLE IF NOT EXISTS digital_twin_config (
+                    config_id INTEGER PRIMARY KEY CHECK (config_id = 1),
+                    config_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                '''
             )
         ]
 

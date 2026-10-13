@@ -40,13 +40,27 @@
         </div>
       </header>
 
+      <div id="fleetMessage" class="status-block" role="status">Waiting for backend fleet data.</div>
       <section class="stats-grid" id="statsGrid"></section>
 
       <section class="panel map-panel">
         <div class="panel-header">
           <h2>Live map</h2>
-          <span id="mapStatus" class="pill warning">Demo mode</span>
+          <span id="mapStatus" class="pill warning">Loading configuration</span>
         </div>
+        <div class="map-toolbar">
+          <label><input id="showObservedRoutes" type="checkbox" checked> Observed GPS paths</label>
+          <label><input id="showPlannedRoutes" type="checkbox" checked> Planned delivery legs</label>
+          <label><input id="showTraffic" type="checkbox"> GPS traffic heatmap</label>
+          <label><input id="showTwin" type="checkbox"> Virtual twin</label>
+          <div class="map-actions">
+            <button id="zoomIn" class="button secondary" type="button" aria-label="Zoom in">+</button>
+            <button id="zoomOut" class="button secondary" type="button" aria-label="Zoom out">−</button>
+            <button id="fitMap" class="button secondary" type="button">Fit visible</button>
+          </div>
+        </div>
+        <p class="muted-copy map-note">Planned legs connect stored pickup and delivery coordinates directly; they are not routed or flight-safety guidance. Heatmap cells show accepted GPS-sample density: cyan (lower), amber (medium), red (higher).</p>
+        <div id="mapMessage" class="status-block" role="status">Waiting for map configuration.</div>
         <div id="map" aria-label="Google map of drone fleet"></div>
       </section>
 
@@ -66,6 +80,50 @@
           </div>
           <div id="deliveryList" class="delivery-list"></div>
         </section>
+      </section>
+
+      <section class="content-grid intelligence-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Selected drone</h2>
+            <select id="selectedDrone" aria-label="Select drone"></select>
+          </div>
+          <div id="droneDetails" class="details-grid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header"><h2>Traffic intelligence</h2><span id="trafficOrigin" class="pill neutral">Waiting</span></div>
+          <div class="traffic-filters">
+            <label>Window
+              <select id="trafficWindow">
+                <option value="1">1 hour</option><option value="6">6 hours</option>
+                <option value="24" selected>24 hours</option><option value="168">7 days</option>
+              </select>
+            </label>
+            <label>Drone <select id="trafficDrone"><option value="">All drones</option></select></label>
+            <label>Mission <input id="trafficMission" type="text" maxlength="64" placeholder="Any mission"></label>
+            <label>Source
+              <select id="trafficSource"><option value="ALL">All observed sources</option><option value="PHONE_GPS">Phone GPS</option></select>
+            </label>
+            <label>Grid cell
+              <select id="trafficCellSize">
+                <option value="0.005">Fine (0.005°)</option>
+                <option value="0.01" selected>Medium (0.01°)</option>
+                <option value="0.02">Wide (0.02°)</option>
+              </select>
+            </label>
+          </div>
+          <div id="trafficSummary" class="traffic-summary"></div>
+        </section>
+      </section>
+
+      <section class="panel twin-panel">
+        <div class="panel-header">
+          <h2>Digital twin foundation</h2>
+          <span class="pill warning">SIMULATED ONLY</span>
+        </div>
+        <p id="twinWarning" class="muted-copy">Virtual routes, corridors and zones are not official aviation restrictions or flight-safety guidance.</p>
+        <div id="twinSummary" class="traffic-summary"></div>
       </section>
     </main>
   </div>

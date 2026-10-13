@@ -19,9 +19,10 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path.startswith('/api/'):
-            status, payload = api.handle('GET', path)
+            status, payload = api.handle('GET', path, query=parsed_url.query)
             self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
@@ -81,9 +82,14 @@ class Handler(BaseHTTPRequestHandler):
     def _write_api(self, method):
         path = urlparse(self.path).path
         if path.startswith('/api/'):
+            parsed_url = urlparse(self.path)
             content_length = int(self.headers.get('Content-Length', '0'))
             body = self.rfile.read(content_length) if content_length > 0 else b''
-            status, payload = api.handle(method, path, body, headers=dict(self.headers.items()))
+            status, payload = api.handle(
+                method, path, body,
+                headers=dict(self.headers.items()),
+                query=parsed_url.query,
+            )
             self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1

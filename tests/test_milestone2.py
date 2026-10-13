@@ -32,7 +32,9 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix='stormpilot_m2_')
         self.original_data_dir = os.environ.get('APP_DATA_DIR')
+        self.original_admin_token = os.environ.get('STORMPILOT_ADMIN_TOKEN')
         os.environ['APP_DATA_DIR'] = self.temp_dir
+        os.environ['STORMPILOT_ADMIN_TOKEN'] = 'milestone-three-test-admin-token-for-tests'
         api.initialize_storage(force_reset=True)
 
     def tearDown(self):
@@ -40,7 +42,15 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
             os.environ.pop('APP_DATA_DIR', None)
         else:
             os.environ['APP_DATA_DIR'] = self.original_data_dir
+        if self.original_admin_token is None:
+            os.environ.pop('STORMPILOT_ADMIN_TOKEN', None)
+        else:
+            os.environ['STORMPILOT_ADMIN_TOKEN'] = self.original_admin_token
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def admin_headers():
+        return {'Authorization': 'Bearer milestone-three-test-admin-token-for-tests'}
 
     def request(self, method, path, payload=None, headers=None):
         data = None if payload is None else json.dumps(payload).encode()
@@ -55,7 +65,11 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
             return exc.code, json.loads(exc.read())
 
     def test_device_enrollment_and_authenticated_telemetry(self):
-        status, payload = self.request('POST', '/api/device/register', {'device_id': 'phone-001', 'drone_id': 'SP-DRONE-01'})
+        status, payload = self.request(
+            'POST', '/api/device/register',
+            {'device_id': 'phone-001', 'drone_id': 'SP-DRONE-01'},
+            self.admin_headers(),
+        )
         self.assertEqual(status, 200)
         self.assertIn('token', payload)
         auth = f"Bearer {payload['token']}"
@@ -76,9 +90,17 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
         self.assertEqual(payload['status'], 'accepted')
 
     def test_revoked_device_cannot_submit_telemetry(self):
-        status, payload = self.request('POST', '/api/device/register', {'device_id': 'phone-002', 'drone_id': 'SP-DRONE-02'})
+        status, payload = self.request(
+            'POST', '/api/device/register',
+            {'device_id': 'phone-002', 'drone_id': 'SP-DRONE-02'},
+            self.admin_headers(),
+        )
         token = payload['token']
-        status, payload = self.request('DELETE', '/api/device/revoke', {'device_id': 'phone-002', 'reason': 'test revocation'})
+        status, payload = self.request(
+            'DELETE', '/api/device/revoke',
+            {'device_id': 'phone-002', 'reason': 'test revocation'},
+            self.admin_headers(),
+        )
         self.assertEqual(status, 200)
         status, payload = self.request(
             'POST',
@@ -121,11 +143,11 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
         api.update_delivery_status('D-2207', 'ASSIGNED')
         status, _ = self.request('POST', '/api/delivery/confirm', {
             'delivery_id': 'D-2207', 'drone_id': 'SP-DRONE-03', 'handover_confirmed': True,
-        })
+        }, self.admin_headers())
         self.assertEqual(status, 409)
         status, _ = self.request('POST', '/api/delivery/confirm', {
-            'delivery_id': 'D-2207', 'drone_id': 'SP-DRONE-02', 'handover_confirmed': False,
-        })
+            'delivery_id': 'D-2207', 'drone_id': 'SP-DRONE-02', 'handover_confirmed': True,
+        }, self.admin_headers())
         self.assertEqual(status, 409)
 
     def test_device_migration_upgrades_existing_schema(self):
@@ -151,7 +173,11 @@ class MilestoneTwoSecurityTests(unittest.TestCase):
         api.update_delivery_status('D-2204', 'ASSIGNED')
         api.update_delivery_status('D-2204', 'PICKUP_CONFIRMED')
         api.update_delivery_status('D-2204', 'IN_TRANSIT')
-        _, registration = self.request('POST', '/api/device/register', {'device_id': 'phone-distance', 'drone_id': 'SP-DRONE-01'})
+        _, registration = self.request(
+            'POST', '/api/device/register',
+            {'device_id': 'phone-distance', 'drone_id': 'SP-DRONE-01'},
+            self.admin_headers(),
+        )
         token = registration['token']
         headers = {'Authorization': f'Bearer {token}'}
         timestamp = datetime.now(timezone.utc)

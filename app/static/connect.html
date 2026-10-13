@@ -27,6 +27,11 @@
             <option>SP-DRONE-04</option>
           </select>
         </label>
+        <label>
+          Administrator enrollment token
+          <input type="password" id="adminToken" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="help-copy">Required only when enrolling a new device. This server-issued administrator credential is sent over HTTPS to authorize registration and is never saved in this page.</p>
         <button id="trackButton" class="button primary" type="submit">Start tracking</button>
       </form>
 
@@ -102,12 +107,20 @@
       const tokenKey = `stormpilot:${droneId}:${deviceId}`;
       deviceToken = sessionStorage.getItem(tokenKey);
       if (!deviceToken) {
+        const adminToken = document.getElementById('adminToken').value.trim();
+        if (!adminToken) {
+          setStatus('An administrator enrollment token is required to register a new device.', 'error');
+          return;
+        }
         setStatus('Registering this device...', 'info');
         trackButton.disabled = true;
         try {
           const response = await fetch('/api/device/register', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${adminToken}`
+            },
             body: JSON.stringify({device_id: deviceId, drone_id: droneId})
           });
           const data = await response.json();

@@ -29,7 +29,13 @@ def application(environ, start_response):
         status, payload, content_type = 405, {'error': 'method not allowed'}, 'application/json'
         headers.append(('Allow', 'GET, POST, PUT, DELETE'))
     elif path.startswith('/api/'):
-        status, payload = api.handle(method, path, body)
+        status, payload = api.handle(
+            method,
+            path,
+            body,
+            headers={'Authorization': environ.get('HTTP_AUTHORIZATION', '')},
+            query=environ.get('QUERY_STRING', ''),
+        )
         content_type = 'application/json'
         _count('api', status)
     elif path in ('/healthz', '/readyz'):
