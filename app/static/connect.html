@@ -1,0 +1,115 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StormPilot | Drone connect</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="connect-page">
+  <main class="connect-shell">
+    <section class="connect-card">
+      <p class="eyebrow">PHONE TRACKING / AUTHORIZATION</p>
+      <h1>Register a demo drone</h1>
+      <p class="lead">Use a registered phone to send GPS telemetry to the backend.</p>
+
+      <form id="connectForm" class="connect-form">
+        <label>
+          Device ID
+          <input type="text" id="deviceId" value="device-1" required>
+        </label>
+        <label>
+          Drone ID
+          <select id="droneId">
+            <option>SP-DRONE-01</option>
+            <option>SP-DRONE-02</option>
+            <option>SP-DRONE-03</option>
+            <option>SP-DRONE-04</option>
+          </select>
+        </label>
+        <button id="trackButton" class="button primary" type="submit">Start tracking</button>
+      </form>
+
+      <div id="geoStatus" class="status-block">Awaiting geolocation permission.</div>
+      <div class="telemetry-summary">
+        <div><strong id="latValue">—</strong><span>Latitude</span></div>
+        <div><strong id="lngValue">—</strong><span>Longitude</span></div>
+        <div><strong id="accuracyValue">—</strong><span>Accuracy</span></div>
+      </div>
+      <div class="inline-actions">
+        <a class="button secondary" href="/ui">Open fleet map</a>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const connectForm = document.getElementById('connectForm');
+    const geoStatus = document.getElementById('geoStatus');
+    const trackButton = document.getElementById('trackButton');
+    let watchId = null;
+
+    function setStatus(message, type = 'info') {
+      geoStatus.className = 'status-block ' + type;
+      geoStatus.textContent = message;
+    }
+
+    function sendTelemetry(position) {
+      const payload = {
+        device_id: document.getElementById('deviceId').value.trim(),
+        drone_id: document.getElementById('droneId').value,
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        timestamp: new Date(position.timestamp).toISOString()
+      };
+
+      document.getElementById('latValue').textContent = payload.lat.toFixed(5);
+      document.getElementById('lngValue').textContent = payload.lng.toFixed(5);
+      document.getElementById('accuracyValue').textContent = `${Math.round(payload.accuracy)} m`;
+
+      fetch('/api/device/telemetry', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      })
+        .then(async response => {
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Telemetry rejected');
+          setStatus(`Telemetry accepted for ${payload.drone_id}.`, 'success');
+        })
+        .catch(error => setStatus(error.message, 'error'));
+    }
+
+    connectForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (!navigator.geolocation) {
+        setStatus('Geolocation is unavailable in this browser.', 'error');
+        return;
+      }
+
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+
+      setStatus('Requesting geolocation permission...', 'info');
+      trackButton.disabled = true;
+      watchId = navigator.geolocation.watchPosition(
+        position => {
+          sendTelemetry(position);
+          trackButton.textContent = 'Tracking';
+        },
+        error => {
+          const message = {
+            1: 'Location access was denied. Grant permission to start GPS sharing.',
+            2: 'Location information is unavailable at the moment.',
+            3: 'The request to retrieve location timed out.'
+          }[error.code] || 'Unable to read the device location.';
+          setStatus(message, 'error');
+          trackButton.disabled = false;
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+      );
+    });
+  </script>
+</body>
+</html>

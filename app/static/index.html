@@ -1,35 +1,75 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f4f6f5">
-<meta name="description" content="StormPilot dispatch reliability and Redmine workspace.">
-<title>StormPilot | Operations</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/app.js" defer></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>StormPilot Fleet Operations</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<a class="skip-link" href="#main">Skip to content</a>
-<aside class="sidebar">
-  <a class="brand" href="/ui"><span class="brand-icon">S</span><span>StormPilot<small>RELIABILITY LAB</small></span></a>
-  <p class="nav-label">WORKSPACE</p>
-  <a class="nav-link active" href="#workspace" aria-current="page"><span aria-hidden="true">▦</span> Project workspace</a>
-  <div class="sidebar-bottom"><span class="status-dot"></span><span>StormPilot service<small>Dispatch service online</small></span></div>
-</aside>
-<main id="main" class="main">
-  <header class="topbar"><div><p class="eyebrow">OPERATIONS / PROJECTS</p><h1>Project workspace</h1></div><div class="top-actions"><span id="last-updated" class="muted">Connecting…</span><button id="refresh" class="button secondary" type="button"><span aria-hidden="true">↻</span> Refresh</button><button id="dispatch" class="button primary" type="button"><span aria-hidden="true">↗</span> Test dispatch</button></div></header>
-  <section class="service-strip" aria-label="Dispatch API status"><div><span class="signal"></span><span><strong id="service-state">Checking service</strong><small id="service-detail">Reading live health and process metrics</small></span></div><a href="/metrics">Metrics <span aria-hidden="true">↗</span></a></section>
-  <section class="workspace-head"><div><p class="eyebrow">CONNECTED PROJECT MANAGEMENT</p><h2>Redmine</h2><p>Projects and recently updated issues from your configured instance.</p></div><a id="instance-link" class="button secondary" href="#" target="_blank" rel="noopener noreferrer" hidden>Open instance <span aria-hidden="true">↗</span></a></section>
-  <section id="workspace-state" class="state-panel" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><h3>Connecting to Redmine</h3><p>Checking the server configuration.</p></div></section>
-  <section id="workspace-data" hidden>
-    <div class="summary-row"><div><strong id="project-count">—</strong><span>Projects</span></div><div><strong id="issues-count">—</strong><span>Issues</span></div><span id="instance-host" class="host-label"></span></div>
-    <div class="content-grid">
-      <section class="data-section"><div class="section-heading"><div><p class="eyebrow">YOUR PORTFOLIO</p><h3>Projects</h3></div><span id="project-total" class="count">0</span></div><div id="projects" class="project-list"></div></section>
-      <section class="data-section"><div class="section-heading"><div><p class="eyebrow">LATEST ACTIVITY</p><h3>Issues</h3></div><span id="issues-total" class="count">0</span></div><div id="issues" class="work-list"></div></section>
-    </div>
-  </section>
-  <footer><span>StormPilot reliability lab</span><span>Educational simulation · no real aircraft</span></footer>
-</main>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">S</div>
+        <div>
+          <strong>StormPilot</strong>
+          <small>Drone ops</small>
+        </div>
+      </div>
+      <nav>
+        <a class="nav-item active" href="/ui">Operations</a>
+        <a class="nav-item" href="/drone/connect">Drone connect</a>
+        <a class="nav-item" href="/metrics">Metrics</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span>Live demo</span>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">OPERATIONS / FLEET</p>
+          <h1>Delivery dashboard</h1>
+        </div>
+        <div class="top-actions">
+          <a class="button secondary" href="/drone/connect">Connect phone</a>
+          <button id="refreshButton" class="button primary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="stats-grid" id="statsGrid"></section>
+
+      <section class="panel map-panel">
+        <div class="panel-header">
+          <h2>Live map</h2>
+          <span id="mapStatus" class="pill warning">Demo mode</span>
+        </div>
+        <div id="map" aria-label="Google map of drone fleet"></div>
+      </section>
+
+      <section class="content-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Drone fleet</h2>
+            <span id="fleetCount" class="pill">0</span>
+          </div>
+          <div id="fleetList" class="fleet-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Delivery activity</h2>
+            <span class="pill neutral">Ops feed</span>
+          </div>
+          <div id="deliveryList" class="delivery-list"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-"""WSGI application used by the bounded production server."""
+﻿"""WSGI application used by the bounded production server."""
 import json
 import mimetypes
 import os
@@ -17,18 +17,26 @@ def application(environ, start_response):
                ('X-Frame-Options', 'DENY'),
                ('Referrer-Policy', 'strict-origin-when-cross-origin')]
 
-    if method != 'GET':
+    body = b''
+    if method not in ('GET', 'HEAD'):
+        try:
+            length = int(environ.get('CONTENT_LENGTH', '0') or '0')
+            body = environ.get('wsgi.input', b'').read(length) if length > 0 else b''
+        except Exception:
+            body = b''
+
+    if method != 'GET' and method != 'POST' and method != 'PUT' and method != 'DELETE':
         status, payload, content_type = 405, {'error': 'method not allowed'}, 'application/json'
-        headers.append(('Allow', 'GET'))
+        headers.append(('Allow', 'GET, POST, PUT, DELETE'))
     elif path.startswith('/api/'):
-        status, payload = api.handle(method, path)
+        status, payload = api.handle(method, path, body)
         content_type = 'application/json'
         _count('api', status)
     elif path in ('/healthz', '/readyz'):
         payload, content_type = {'status': 'ok'}, 'application/json'
     elif path == '/':
         payload = {
-            'project': 'StormPilot', 'mission': 'Resilient drone dispatch',
+            'project': 'StormPilot', 'mission': 'Drone delivery operations',
             'instance': os.getenv('HOSTNAME', 'local'),
             'version': os.getenv('APP_VERSION', 'dev'), 'ui': '/ui',
         }
@@ -42,30 +50,35 @@ def application(environ, start_response):
         _count(path, status)
     elif path == '/metrics':
         status, payload, content_type = 200, _metrics(), 'text/plain; version=0.0.4'
-    elif path in ('/ui', '/ui/') or path.startswith('/static/'):
+    elif path in ('/ui', '/ui/') or path == '/drone/connect' or path.startswith('/static/'):
         status, payload, content_type = _static(path)
-        if path not in ('/ui', '/ui/'):
+        if path not in ('/ui', '/ui/', '/drone/connect'):
             _count('static', status)
     else:
         status, payload, content_type = 404, {'error': 'not found'}, 'application/json'
         _count('other', status)
 
     if content_type == 'application/json':
-        body = json.dumps(payload).encode()
+        body_bytes = json.dumps(payload).encode()
     elif isinstance(payload, str):
-        body = payload.encode()
+        body_bytes = payload.encode()
     else:
-        body = payload
-    headers.extend([('Content-Type', content_type), ('Content-Length', str(len(body)))])
+        body_bytes = payload
+    headers.extend([('Content-Type', content_type), ('Content-Length', str(len(body_bytes)))])
     if path.startswith('/api/'):
         headers.append(('Cache-Control', 'no-store'))
     phrase = HTTPStatus(status).phrase
     start_response(f'{status} {phrase}', headers)
-    return [body]
+    return [body_bytes]
 
 
 def _static(path):
-    name = 'index.html' if path in ('/ui', '/ui/') else path[len('/static/'):]
+    if path in ('/ui', '/ui/'):
+        name = 'index.html'
+    elif path == '/drone/connect':
+        name = 'connect.html'
+    else:
+        name = path[len('/static/'):]
     if '/' in name or '\\' in name or '..' in name or not name:
         return 404, {'error': 'not found'}, 'application/json'
     full_path = os.path.join(STATIC_DIR, name)

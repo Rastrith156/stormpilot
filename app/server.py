@@ -1,4 +1,4 @@
-import json
+﻿import json
 import mimetypes
 import os
 import threading
@@ -17,6 +17,7 @@ LOCK = threading.Lock()
 START = time.monotonic()
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
@@ -26,7 +27,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
             return
-        if path in ('/ui', '/ui/') or path.startswith('/static/'):
+        if path in ('/ui', '/ui/') or path == '/drone/connect' or path.startswith('/static/'):
             self._serve_static(path)
             return
         status = 200
@@ -34,12 +35,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/healthz', '/readyz'):
             body = {'status': 'ok'}
         elif path == '/':
-            body = {'project': 'StormPilot', 'mission': 'Resilient drone dispatch',
+            body = {'project': 'StormPilot', 'mission': 'Drone delivery operations',
                     'instance': os.getenv('HOSTNAME', 'local'),
                     'version': os.getenv('APP_VERSION', 'dev'),
                     'ui': '/ui'}
         elif path == '/dispatch':
-            # Deterministic CPU work enables an observable CPU autoscaling demo.
             value = 1
             for i in range(100000):
                 value = (value * 31 + i) % 1000000007
@@ -82,7 +82,9 @@ class Handler(BaseHTTPRequestHandler):
     def _write_api(self, method):
         path = urlparse(self.path).path
         if path.startswith('/api/'):
-            status, payload = api.handle(method, path)
+            content_length = int(self.headers.get('Content-Length', '0'))
+            body = self.rfile.read(content_length) if content_length > 0 else b''
+            status, payload = api.handle(method, path, body)
             self._send_json(status, payload)
             with LOCK:
                 COUNTS[('api', status or 500)] += 1
@@ -107,6 +109,8 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, path):
         if path in ('/ui', '/ui/'):
             name = 'index.html'
+        elif path == '/drone/connect':
+            name = 'connect.html'
         else:
             name = path[len('/static/'):]
         if '/' in name or '\\' in name or '..' in name or not name:
@@ -120,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
                 ctype = mimetypes.guess_type(full)[0] or 'application/octet-stream'
             else:
                 status, content, ctype = 404, json.dumps({'error': 'not found'}).encode(), 'application/json'
-        if path not in ('/ui', '/ui/'):
+        if path not in ('/ui', '/ui/', '/drone/connect'):
             route = 'static'
             with LOCK:
                 COUNTS[(route, status)] += 1
@@ -132,6 +136,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         print(json.dumps({'event': 'http', 'message': fmt % args}), flush=True)
+
 
 if __name__ == '__main__':
     ThreadingHTTPServer((os.getenv('HOST', '127.0.0.1'), int(os.getenv('PORT', '8080'))), Handler).serve_forever()
