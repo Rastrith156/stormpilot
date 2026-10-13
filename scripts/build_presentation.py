@@ -65,8 +65,8 @@ def make_report():
     doc.add_heading('Executive Summary', level=1)
     doc.add_paragraph(
         'StormPilot is an educational local lab combining a simulated drone-dispatch API '
-        'with a Scrum and Kanban project workflow. It demonstrates application health and '
-        'metrics, SQLite-backed work tracking, container hardening, monitoring configuration, '
+        'with a read-only OpenProject integration. It demonstrates application health and '
+        'metrics, server-side project tracking, container hardening, monitoring configuration, '
         'Kubernetes recovery patterns, and controlled fault-injection procedures. The project '
         'is implemented and has passed its local Python tests and smoke checks; the Docker, '
         'monitoring, and Kubernetes demonstrations still require validation in an environment '
@@ -76,21 +76,21 @@ def make_report():
     doc.add_heading('Purpose and Scope', level=1)
     doc.add_paragraph(
         'The scenario models a dispatch service that should remain observable and recoverable '
-        'during routine failures. Alongside the API, the web interface supports backlog stories, '
-        'sprints, task assignment, priorities, due dates, and a four-column Kanban board with '
-        'work-in-progress limits.'
+        'during routine failures. The web interface connects to a configured OpenProject server '
+        'and displays accessible projects and recently updated work packages.'
     )
 
     doc.add_heading('System Design', level=1)
     doc.add_paragraph(
-        'The browser UI calls a dependency-free Python HTTP server. API routes manage stories, '
-        'sprints, tasks, board state, and WIP limits in SQLite. Operational routes expose health, '
+        'The browser UI calls a dependency-free Python HTTP server. A server-side read-only proxy '
+        'fetches projects and work packages from the OpenProject REST API; credentials never enter '
+        'the browser. Operational routes expose health, '
         'readiness, dispatch, and Prometheus-formatted metrics. Docker Compose defines the API, '
         'Prometheus, and Grafana. Kubernetes manifests define a replicated API deployment, '
         'health probes, resource settings, a disruption budget, and an optional CPU HPA.'
     )
     for item in [
-        'Application: Python standard-library HTTP server and JSON API; persistent SQLite data.',
+        'Application: Python standard-library HTTP server and JSON API; read-only OpenProject connection.',
         'Container: non-root runtime and HTTP health check; Compose API configured read-only with dropped capabilities.',
         'Observability: request counters and uptime metrics, Prometheus scrape/rules, provisioned Grafana dashboard.',
         'Resilience lab: Kubernetes reconciliation, guarded one-pod experiment, and optional metrics-server-dependent autoscaling.',
@@ -99,26 +99,26 @@ def make_report():
 
     doc.add_heading('Local Demonstration', level=1)
     doc.add_paragraph(
-        'Start the application from the repository root with `python app/server.py`, then open '
-        'http://localhost:8080/ui. The captured local board shows the existing task “Kanban” in '
-        'To Do with Critical priority. No sample records were added for this report.'
+        'Configure OPENPROJECT_URL and OPENPROJECT_API_TOKEN on the server, start the application '
+        'from the repository root with `python app/server.py`, then open http://localhost:8080/ui. '
+        'Without configuration the dispatch console remains usable and shows a setup state.'
     )
     if SCREENSHOT.exists():
         image_paragraph = doc.add_paragraph()
         image_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         image_paragraph.add_run().add_picture(str(SCREENSHOT), width=DocInches(6.4))
-        caption = doc.add_paragraph('Figure 1. StormPilot Kanban board captured from the running local application.')
+        caption = doc.add_paragraph('Figure 1. StormPilot project workspace captured from the running local application.')
         caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         caption.runs[0].italic = True
         caption.runs[0].font.size = DocPt(9)
 
     doc.add_heading('Validation Evidence', level=1)
     evidence = [
-        ('Python integration tests', 'All six HTTP integration tests passed.'),
+        ('Python integration tests', 'HTTP service and mocked OpenProject integration tests passed.'),
         ('Live API smoke checks', 'Identity, readiness, health, dispatch, and metrics routes responded.'),
         ('Bounded local traffic check', '130 successful requests and zero failures during a two-second smoke run; this is not a capacity or uptime claim.'),
         ('Configuration checks', 'Bash syntax and all YAML and JSON configuration files parsed successfully.'),
-        ('Browser check', 'Kanban view displays the existing task; Scrum/Kanban switching and modal hidden-state behavior verified locally.'),
+        ('Browser check', 'Project workspace renders OpenProject setup, loading, data, and error states.'),
     ]
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Light Shading Accent 1'
@@ -228,8 +228,8 @@ def make_presentation():
 
     slide = new_slide(prs)
     add_text(slide, 'STORMPILOT / PROJECT BRIEF', 0.8, 0.72, 8.8, 0.3, 11, CYAN, True)
-    add_text(slide, 'Resilient Dispatch\n& Agile Delivery', 0.8, 1.45, 8.5, 1.65, 34, WHITE, True, 'Aptos Display')
-    add_text(slide, 'A local reliability-engineering lab with a working Scrum and Kanban workflow',
+    add_text(slide, 'Resilient Dispatch\n& Project Operations', 0.8, 1.45, 8.5, 1.65, 34, WHITE, True, 'Aptos Display')
+    add_text(slide, 'A local reliability-engineering lab with an OpenProject workspace',
              0.82, 3.38, 7.6, 0.7, 18, MUTED)
     add_text(slide, f'Project presentation  |  {PRESENTATION_DATE}', 0.82, 6.65, 8.0, 0.3, 12, MUTED)
     for x, number, label, color in [
@@ -241,25 +241,25 @@ def make_presentation():
         add_text(slide, number, x + 0.12, 2.0, 0.72, 0.45, 22, color, True, align=PP_ALIGN.CENTER)
         add_text(slide, label, x + 0.1, 4.72, 0.76, 0.45, 10, WHITE, True, align=PP_ALIGN.CENTER)
 
-    slide = new_slide(prs, 'Product workflow in the browser', '01 / User experience')
+    slide = new_slide(prs, 'OpenProject workspace in the browser', '01 / User experience')
     if SCREENSHOT.exists():
         slide.shapes.add_picture(str(SCREENSHOT), Inches(0.65), Inches(1.65), width=Inches(8.15), height=Inches(4.15))
     add_box(slide, 9.1, 1.65, 3.55, 4.15)
     add_text(slide, 'LIVE LOCAL CAPTURE', 9.42, 1.98, 2.9, 0.25, 10, CYAN, True)
-    add_text(slide, 'Kanban board', 9.42, 2.48, 2.9, 0.45, 21, WHITE, True, 'Aptos Display')
+    add_text(slide, 'OpenProject', 9.42, 2.48, 2.9, 0.45, 21, WHITE, True, 'Aptos Display')
     add_bullet_list(slide, [
-        'Four workflow stages with WIP limits',
-        'Existing task: Kanban / To Do / Critical',
-        'Scrum backlog and sprint views also available',
-        'SQLite-backed tasks, stories, and sprints',
+        'Read-only REST API v3 integration',
+        'Projects and recently updated work packages',
+        'Server-side API token; never sent to browser',
+        'Helpful setup state when unconfigured',
     ], 9.42, 3.18, 2.95, 0.58, 14)
     add_text(slide, 'Captured from localhost; no demo records added for this deck.', 0.68, 6.18, 8.8, 0.3, 10, MUTED)
 
     slide = new_slide(prs, 'One application, several reliability layers', '02 / Architecture')
     nodes = [
-        (0.65, 2.0, 2.35, 1.15, 'Browser UI', 'Scrum + Kanban', CYAN),
+        (0.65, 2.0, 2.35, 1.15, 'Browser UI', 'Projects + work packages', CYAN),
         (3.55, 2.0, 2.55, 1.15, 'Python HTTP API', 'JSON + health + metrics', BLUE),
-        (6.7, 2.0, 2.3, 1.15, 'SQLite', 'Persistent work data', AMBER),
+        (6.7, 2.0, 2.3, 1.15, 'OpenProject', 'Read-only REST API v3', AMBER),
         (9.6, 2.0, 3.05, 1.15, 'Prometheus / Grafana', 'Configured observability', CYAN),
     ]
     for x, y, w, h, title, subtitle, accent in nodes:
@@ -306,7 +306,7 @@ def make_presentation():
     add_bullet_list(slide, [
         'Live checks covered identity, readiness, health, dispatch, and metrics.',
         'Bash syntax and YAML/JSON configuration parsing passed.',
-        'Browser confirms the task board and modal/tab navigation locally.',
+        'OpenProject tests mock remote API data, denied credentials and unavailable server cases.',
     ], 1.0, 4.05, 11.2, 0.63, 15)
     add_text(slide, 'Short smoke test only: not a capacity, uptime, or SLO measurement.',
              1.0, 6.3, 11.2, 0.35, 12, AMBER, True)
@@ -323,7 +323,7 @@ def make_presentation():
     add_box(slide, 6.82, 1.7, 5.75, 3.95)
     add_text(slide, 'Presentation flow', 7.12, 2.0, 4.9, 0.42, 20, CYAN, True, 'Aptos Display')
     add_bullet_list(slide, [
-        'Show Scrum/Kanban board and the saved task',
+        'Show OpenProject workspace and server-side configuration',
         'Run the six tests and local API smoke checks',
         'Explain Compose observability and Kubernetes recovery design',
         'Separate executed evidence from configured experiments',

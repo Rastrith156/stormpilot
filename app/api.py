@@ -1,213 +1,111 @@
-"""JSON API routes for the Scrum and Kanban modules.
-
-Dispatch is intentionally tiny: the base server keeps its original routes
-untouched and delegates everything under ``/api/`` here.  Responses follow
-the project's plain-JSON style; errors carry ``{'error': message}``.
-"""
+"""Read-only OpenProject API proxy for the StormPilot UI."""
+import base64
 import json
-import re
-from urllib.parse import parse_qs, urlparse
-
-try:
-    from app import db
-except ImportError:  # script execution: python app/server.py
-    import db
-
-ROUTE_PATTERNS = [
-    ('GET', re.compile(r'^/api/sprints$'), 'list_sprints'),
-    ('POST', re.compile(r'^/api/sprints$'), 'create_sprint'),
-    ('GET', re.compile(r'^/api/sprints/(\d+)$'), 'get_sprint'),
-    ('PUT', re.compile(r'^/api/sprints/(\d+)$'), 'update_sprint'),
-    ('DELETE', re.compile(r'^/api/sprints/(\d+)$'), 'delete_sprint'),
-    ('GET', re.compile(r'^/api/backlog$'), 'list_stories'),
-    ('POST', re.compile(r'^/api/backlog$'), 'create_story'),
-    ('PUT', re.compile(r'^/api/backlog/(\d+)$'), 'update_story'),
-    ('DELETE', re.compile(r'^/api/backlog/(\d+)$'), 'delete_story'),
-    ('GET', re.compile(r'^/api/tasks$'), 'list_tasks'),
-    ('POST', re.compile(r'^/api/tasks$'), 'create_task'),
-    ('POST', re.compile(r'^/api/tasks/samples$'), 'seed_sample_tasks'),
-    ('GET', re.compile(r'^/api/tasks/(\d+)$'), 'get_task'),
-    ('PUT', re.compile(r'^/api/tasks/(\d+)$'), 'update_task'),
-    ('DELETE', re.compile(r'^/api/tasks/(\d+)$'), 'delete_task'),
-    ('POST', re.compile(r'^/api/tasks/(\d+)/move$'), 'move_task'),
-    ('GET', re.compile(r'^/api/board$'), 'get_board'),
-    ('GET', re.compile(r'^/api/wip-limits$'), 'get_wip_limits'),
-    ('PUT', re.compile(r'^/api/wip-limits$'), 'set_wip_limits'),
-]
+import os
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 
 def handle(handler, method, path):
-    """Route an /api/ request. Returns the HTTP status sent, or None for
-    paths outside the API (so the base server can handle them itself)."""
-    if not path.startswith('/api/'):
-        return None
-    for verb, pattern, name in ROUTE_PATTERNS:
-        if verb != method:
-            continue
-        match = pattern.match(path)
-        if match:
-            return _dispatch(handler, method, name, match.groups())
-    # Known prefix but no route/method match.
-    _send(handler, 404, {'error': 'not found'})
-    return 404
-
-
-def _dispatch(handler, method, name, groups):
-    status = 500
+    if method != 'GET' or path != '/api/openproject':
+        _send(handler, 404, {'error': 'not found'})
+        return 404
+    base = os.getenv('OPENPROJECT_URL', '').strip().rstrip('/')
+    token = os.getenv('OPENPROJECT_API_TOKEN', '').strip()
+    if not base or not token:
+        _send(handler, 200, {'configured': False})
+        return 200
+    parsed = urlsplit(base)
+    if (parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username
+            or parsed.password or parsed.query or parsed.fragment):
+        _send(handler, 200, {'configured': False, 'message': 'OpenProject configuration is invalid.'})
+        return 200
     try:
-        body = _read_body(handler) if method in ('POST', 'PUT') else None
-        query = parse_qs(urlparse(handler.path).query)
-        status, payload = _route(name, groups, body, query)
-        _send(handler, status, payload)
-    except db.ApiError as exc:
-        status = exc.status
-        _send(handler, status, {'error': exc.message})
-    except (ValueError, json.JSONDecodeError):
-        status = 400
-        _send(handler, status, {'error': 'request body must be valid JSON'})
-    except ConnectionError:
-        # Client hung up (covers BrokenPipeError); nothing left to deliver.
-        pass
-    except Exception as exc:  # pragma: no cover - defensive log, matches server style
-        status = 500
-        print(json.dumps({'event': 'error', 'message': str(exc)}), flush=True)
-        try:
-            _send(handler, status, {'error': 'internal server error'})
-        except ConnectionError:
-            pass
-    return status
+        projects = _get(base, token, '/api/v3/projects?filters=%5B%5D&offset=1&pageSize=100')
+        work = _get(
+            base, token,
+            '/api/v3/work_packages?filters=%5B%5D&offset=1&pageSize=20'
+            '&sortBy=%5B%5B%22updatedAt%22%2C%22desc%22%5D%5D')
+        project_rows = _elements(projects)
+        work_rows = _elements(work)
+        result = {
+            'configured': True,
+            'instance_url': base,
+            'projects': [_project(p, base) for p in project_rows],
+            'work_packages': [_work_package(w, base) for w in work_rows],
+            'counts': {
+                'projects': _count(projects, project_rows),
+                'work_packages': _count(work, work_rows),
+            },
+        }
+        _send(handler, 200, result)
+        return 200
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            message = 'OpenProject rejected the API token. Check the token and its read permissions.'
+        else:
+            message = 'OpenProject could not complete the request. Check the instance and try again.'
+        _send(handler, 502, {'error': message})
+        return 502
+    except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        _send(handler, 502, {'error': 'OpenProject is unavailable or returned an invalid response. Try again shortly.'})
+        return 502
 
 
-def _route(name, groups, body, query):
-    if name == 'list_sprints':
-        return 200, db.list_sprints()
-    if name == 'create_sprint':
-        return 201, db.create_sprint(body or {})
-    if name == 'get_sprint':
-        return 200, db.get_sprint(int(groups[0]))
-    if name == 'update_sprint':
-        return 200, db.update_sprint(int(groups[0]), body or {})
-    if name == 'delete_sprint':
-        return 200, db.delete_sprint(int(groups[0]))
-    if name == 'list_stories':
-        return 200, db.list_stories()
-    if name == 'create_story':
-        return 201, db.create_story(body or {})
-    if name == 'update_story':
-        return 200, db.update_story(int(groups[0]), body or {})
-    if name == 'delete_story':
-        return 200, db.delete_story(int(groups[0]))
-    if name == 'list_tasks':
-        return 200, db.list_tasks(_task_filters(query))
-    if name == 'create_task':
-        return 201, db.create_task(body or {})
-    if name == 'seed_sample_tasks':
-        return 200, db.seed_sample_tasks()
-    if name == 'get_task':
-        return 200, db.get_task(int(groups[0]))
-    if name == 'update_task':
-        return 200, db.update_task(int(groups[0]), body or {})
-    if name == 'delete_task':
-        return 200, db.delete_task(int(groups[0]))
-    if name == 'move_task':
-        if not isinstance(body, dict) or 'status' not in body:
-            raise db.ApiError(400, 'status is required')
-        return 200, db.move_task(int(groups[0]), body['status'])
-    if name == 'get_board':
-        return 200, _board_payload()
-    if name == 'get_wip_limits':
-        return 200, db.get_wip_limits()
-    if name == 'set_wip_limits':
-        return 200, db.set_wip_limits(body or {})
-    raise db.ApiError(404, 'not found')  # pragma: no cover
+def _get(base, token, path):
+    credentials = base64.b64encode(f'apikey:{token}'.encode()).decode()
+    request = Request(base + path, headers={
+        'Accept': 'application/hal+json, application/json',
+        'Authorization': f'Basic {credentials}',
+        'User-Agent': 'StormPilot/1.0',
+    })
+    with urlopen(request, timeout=5) as response:
+        return json.loads(response.read())
 
 
-def _board_payload():
-    limits = db.get_wip_limits()
-    columns = []
-    for key in db.KANBAN_COLUMNS:
-        tasks = db.list_tasks({'status': key})
-        limit = limits.get(key)
-        columns.append({
-            'key': key,
-            'label': db.COLUMN_LABELS[key],
-            'limit': limit,
-            'count': len(tasks),
-            'over_limit': limit is not None and len(tasks) > limit,
-            'tasks': tasks,
-        })
-    tasks = db.list_tasks()
-    by_priority = {priority: sum(task['priority'] == priority for task in tasks)
-                   for priority in db.PRIORITIES}
+def _elements(payload):
+    return payload.get('_embedded', {}).get('elements', [])
+
+
+def _count(payload, rows):
+    return payload.get('total', len(rows))
+
+
+def _project(item, base):
     return {
-        'columns': columns,
-        'wip_limits': limits,
-        'summary': {
-            'total': len(tasks),
-            'by_status': {column['key']: column['count'] for column in columns},
-            'by_priority': by_priority,
-            'blocked': sum(task['status'] == 'blocked' for task in tasks),
-            'completed': sum(task['status'] == 'done' for task in tasks),
-        },
+        'id': item.get('id'), 'name': item.get('name', 'Untitled project'),
+        'description': _plain(item.get('description')),
+        'status': _plain(item.get('status') or item.get('_links', {}).get('status', {}).get('title')),
+        'url': f"{base}/projects/{item.get('identifier') or item.get('id')}",
     }
 
 
-def _task_filters(query):
-    filters = {}
-    for key in ('sprint_id', 'story_id', 'status', 'priority', 'task_type', 'assignee', 'search', 'is_sample'):
-        if key not in query:
-            continue
-        raw = query[key][0]
-        if key == 'status':
-            if raw not in db.KANBAN_COLUMNS:
-                raise db.ApiError(
-                    400, f'status must be one of: {", ".join(db.KANBAN_COLUMNS)}')
-            filters[key] = raw
-        elif key == 'priority':
-            if raw not in db.PRIORITIES:
-                raise db.ApiError(400, f'priority must be one of: {", ".join(db.PRIORITIES)}')
-            filters[key] = raw
-        elif key == 'task_type':
-            if raw not in db.TASK_TYPES:
-                raise db.ApiError(400, f'task_type must be one of: {", ".join(db.TASK_TYPES)}')
-            filters[key] = raw
-        elif key == 'assignee':
-            filters[key] = raw.strip()
-        elif key == 'search':
-            sample_id = re.fullmatch(r'sp-0*(\d+)', raw.strip(), re.IGNORECASE)
-            if sample_id:
-                filters['task_id'] = int(sample_id.group(1))
-            else:
-                filters[key] = raw.strip()
-        elif key == 'is_sample':
-            if raw not in ('true', 'false'):
-                raise db.ApiError(400, 'is_sample must be true or false')
-            filters[key] = raw == 'true'
-        else:
-            try:
-                filters[key] = int(raw)
-            except ValueError:
-                raise db.ApiError(400, f'{key} must be an integer') from None
-    return filters
+def _work_package(item, base):
+    links = item.get('_links', {})
+    return {
+        'id': item.get('id'), 'subject': item.get('subject', 'Untitled work package'),
+        'type': _plain(links.get('type', {}).get('title')),
+        'status': _plain(links.get('status', {}).get('title')),
+        'priority': _plain(links.get('priority', {}).get('title')),
+        'assignee': _plain(links.get('assignee', {}).get('title')),
+        'project': _plain(links.get('project', {}).get('title')),
+        'updated_at': item.get('updatedAt', ''),
+        'url': f"{base}/work_packages/{item.get('id')}",
+    }
 
 
-def _read_body(handler):
-    length = int(handler.headers.get('Content-Length') or 0)
-    if length <= 0:
-        return {}
-    raw = handler.rfile.read(length)
-    if not raw:
-        return {}
-    data = json.loads(raw.decode('utf-8'))
-    if not isinstance(data, dict):
-        raise db.ApiError(400, 'request body must be a JSON object')
-    return data
+def _plain(value):
+    if isinstance(value, dict):
+        return value.get('raw', '')
+    return value or ''
 
 
 def _send(handler, status, payload):
     content = json.dumps(payload).encode()
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json')
+    handler.send_header('Cache-Control', 'no-store')
     handler.send_header('Content-Length', str(len(content)))
     handler.end_headers()
     handler.wfile.write(content)

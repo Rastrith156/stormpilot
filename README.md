@@ -25,7 +25,7 @@ Users → API ← Prometheus ← Grafana
 - CPU HPA manifest (requires metrics-server), PodDisruptionBudget, restricted pod security.
 - A namespace- and context-restricted pod-deletion experiment.
 - Provisioned Grafana dashboard and Prometheus alert rules in Compose.
-- Separate SQLite-backed Scrum/Kanban task API with seven workflow stages, search/filters, WIP limits and opt-in sample tasks.
+- Read-only OpenProject API integration with server-side credentials and a responsive project workspace.
 - Bounded local load generator, demo guide, rollback and incident runbook.
 
 ## Prerequisites
@@ -88,12 +88,10 @@ kubectl --context kind-stormpilot -n stormpilot-lab rollout status deployment/st
 ```
 Replace placeholders before running. The image must be publicly pullable, or configure a namespace-scoped registry pull secret securely. Never commit a token. For a local offline release, build a new unique local tag and load it into kind first. See docs/RUNBOOK.md for rollback.
 
-## 6. Project task board
-Open `http://localhost:8080/ui` and select **Kanban board**. This is a project-management subsystem, separate from the simulated `GET /dispatch` route. It is intended for a trusted local lab only: task endpoints do not authenticate callers, so do not expose the app publicly or to an untrusted network.
+## 6. OpenProject workspace
+Open `http://localhost:8080/ui`. Without OpenProject configuration the dispatch console still works and the workspace shows setup guidance. To connect an instance, copy `.env.example` to `.env`, set `OPENPROJECT_URL` to the instance base URL and `OPENPROJECT_API_TOKEN` to a read-only API token, then restart Compose. The token is sent only from the StormPilot server to OpenProject and is never returned to the browser. The workspace displays visible projects and recently updated work packages with links to their OpenProject pages.
 
-Tasks move through Backlog → To Do → In Progress → Code Review → Testing → Done. Blocked is an exception state with a required reason. The API enforces transitions; a task cannot enter Done without acceptance criteria and completion evidence. “Load sample tasks” is explicit and idempotent; examples are marked SAMPLE and start in Backlog. API details and the transition table are in [docs/KANBAN.md](docs/KANBAN.md).
-
-Compose stores the SQLite task database in the `stormpilot-data` named volume. The Kubernetes lab currently uses a separate ephemeral `emptyDir` for each replica. As a result, task updates are not shared between replicas and are lost when a pod is replaced. Use the local/Compose board for persistence demonstrations; do not treat the Kubernetes board as shared team storage. A shared database and authentication are prerequisites for team use.
+The integration uses OpenProject's REST API v3 and performs read-only requests. It does not provide OpenProject authentication for StormPilot users, mutate work packages, or make the local app suitable for public exposure. In Kubernetes, set `OPENPROJECT_URL` in `k8s/base.yaml`; optionally create a Secret with `kubectl --context kind-stormpilot -n stormpilot-lab create secret generic openproject-credentials --from-literal=api-token="$OPENPROJECT_API_TOKEN"`. Store the token in the shell environment first. Use a trusted local environment and protect the secret through your cluster's normal controls.
 
 ## Project status and limitations
 The archive provides implementation and instructions, not a deployed cloud service. See VALIDATION.md for checks actually executed. Kubernetes recovery, autoscaling, image scans and GitHub publishing need your environment for end-to-end verification. This is an educational HTTP server, not production-ready drone software. It has no authentication, TLS ingress, durable dispatch storage, multizone failover or automatic rollback. Do not expose it publicly.

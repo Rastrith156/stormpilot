@@ -27,23 +27,25 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         seccompProfile: {type: RuntimeDefault}
-      volumes:
-        - name: pm-data
-          emptyDir: {}
       containers:
         - name: api
           image: stormpilot:local
           imagePullPolicy: IfNotPresent
           env:
-            - {name: STORMPILOT_DB, value: /data/stormpilot.db}
+            - name: OPENPROJECT_URL
+              value: ""
+            - name: OPENPROJECT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openproject-credentials
+                  key: api-token
+                  optional: true
           ports:
             - {name: http, containerPort: 8080}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
-          volumeMounts:
-            - {name: pm-data, mountPath: /data}
           resources:
             requests: {cpu: 100m, memory: 64Mi}
             limits: {cpu: 500m, memory: 128Mi}
