@@ -106,7 +106,7 @@ class FleetTests(unittest.TestCase):
 
     def test_missing_smtp_credentials_warns_without_failing(self):
         with unittest.mock.patch.dict(os.environ, {'SMTP_HOST': '', 'SMTP_USERNAME': '', 'SMTP_APP_PASSWORD': ''}, clear=False):
-            status, payload = self.request('POST', '/api/email/test', {'to': 'ops@example.com'})
+            status, payload = self.request('POST', '/api/email/test', {'to': 'ops@example.com'}, headers=self.admin_session)
         self.assertEqual(status, 200)
         self.assertIn('warning', payload['status'])
 

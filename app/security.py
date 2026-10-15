@@ -178,7 +178,7 @@ def login(payload, headers=None):
         csrf_token = secrets.token_urlsafe(32)
         expires = now + timedelta(hours=SESSION_HOURS)
         with conn:
-            conn.execute('DELETE FROM admin_login_attempts WHERE username_key = ?', (username,))
+            conn.execute('DELETE FROM admin_login_attempts WHERE username_key = ?', (account_key,))
             conn.execute('DELETE FROM admin_login_attempts WHERE username_key = ?', (network_key,))
             conn.execute(
                 "DELETE FROM admin_sessions WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)",

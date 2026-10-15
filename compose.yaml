@@ -21,6 +21,7 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD:-}
       DELIVERY_NOTIFICATION_TO: ${DELIVERY_NOTIFICATION_TO:-}
+      SMTP_LOCAL_TEST_MODE: ${SMTP_LOCAL_TEST_MODE:-false}
       ARRIVAL_GEOFENCE_RADIUS_M: ${ARRIVAL_GEOFENCE_RADIUS_M:-50}
     volumes: [stormpilot-data:/data]
     networks: [default, edge]
@@ -39,6 +40,7 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_APP_PASSWORD: ${SMTP_APP_PASSWORD:-}
       DELIVERY_NOTIFICATION_TO: ${DELIVERY_NOTIFICATION_TO:-}
+      SMTP_LOCAL_TEST_MODE: ${SMTP_LOCAL_TEST_MODE:-false}
     volumes: [stormpilot-data:/data]
     networks: [default]
   prometheus:

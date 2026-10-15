@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1220">
   <title>StormPilot Fleet Operations</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -19,6 +20,7 @@
       </div>
       <nav>
         <a class="nav-item active" href="/ui">Operations</a>
+        <a class="nav-item" href="#agileBoard">Planbox Agile</a>
         <a class="nav-item" href="/drone/connect">Drone connect</a>
         <a class="nav-item" href="/metrics">Metrics</a>
       </nav>
@@ -52,6 +54,7 @@
           <label><input id="showObservedRoutes" type="checkbox" checked> Observed GPS paths</label>
           <label><input id="showPlannedRoutes" type="checkbox" checked> Planned delivery legs</label>
           <label><input id="showTraffic" type="checkbox"> GPS traffic heatmap</label>
+          <label><input id="showBengaluruDemo" type="checkbox" checked> Bengaluru demo · 5 sample deliveries</label>
           <label><input id="showTwin" type="checkbox"> Virtual twin</label>
           <div class="map-actions">
             <button id="zoomIn" class="button secondary" type="button" aria-label="Zoom in">+</button>
@@ -59,9 +62,10 @@
             <button id="fitMap" class="button secondary" type="button">Fit visible</button>
           </div>
         </div>
-        <p class="muted-copy map-note">Planned legs connect stored pickup and delivery coordinates directly; they are not routed or flight-safety guidance. Heatmap cells show accepted GPS-sample density: cyan (lower), amber (medium), red (higher).</p>
+        <p class="muted-copy map-note">Planned legs connect stored pickup and delivery coordinates directly; they are not routed or flight-safety guidance. GPS heatmap uses accepted fixes; the Bengaluru demo heatmap uses simulated route samples only. Demo data is not live GPS or flight guidance.</p>
         <div id="mapMessage" class="status-block" role="status">Waiting for map configuration.</div>
         <div id="map" aria-label="Google map of drone fleet"></div>
+        <div id="bengaluruDemoList" class="bengaluru-demo-list" aria-live="polite"></div>
       </section>
 
       <section class="content-grid">
@@ -80,6 +84,56 @@
           </div>
           <div id="deliveryList" class="delivery-list"></div>
         </section>
+      </section>
+
+      <section id="agileBoard" class="panel agile-panel" aria-labelledby="agileHeading">
+        <div class="panel-header">
+          <div><p class="eyebrow">TEAM DELIVERY / SPRINTS</p><h2 id="agileHeading">Planbox Agile</h2></div>
+          <div class="inline-actions agile-header-actions">
+            <a id="agileSignInLink" class="button secondary" href="#authHeading">Sign in to plan</a>
+            <label class="agile-sprint-filter">Board
+              <select id="agileSprintFilter" aria-label="Filter Agile board by sprint">
+                <option value="all">All work</option>
+              </select>
+            </label>
+            <button id="refreshAgileBoard" class="button secondary" type="button">Refresh board</button>
+          </div>
+        </div>
+        <div id="agileMessage" class="status-block" role="status">Sign in to view the team board.</div>
+        <div id="agileSummary" class="agile-summary" aria-live="polite"></div>
+        <div id="agileSprintManage" class="agile-sprint-manage" hidden>
+          <div><strong id="agileSprintName"></strong><span id="agileSprintInfo" class="muted-copy"></span></div>
+          <div class="inline-actions">
+            <button id="startAgileSprint" class="button secondary" type="button" hidden>Start sprint</button>
+            <button id="completeAgileSprint" class="button secondary" type="button" hidden>Complete sprint</button>
+          </div>
+        </div>
+        <div class="agile-columns" id="agileColumns" aria-live="polite"></div>
+
+        <div class="agile-forms">
+          <form id="agileTaskForm" class="workbench-form agile-form" hidden>
+            <h3>Add work item</h3>
+            <label>Title <input name="title" required maxlength="160" placeholder="What needs to be done?"></label>
+            <label>Description <textarea name="description" maxlength="2000" rows="2" placeholder="Add useful context"></textarea></label>
+            <label>Priority
+              <select name="priority"><option>LOW</option><option selected>NORMAL</option><option>HIGH</option><option>URGENT</option></select>
+            </label>
+            <label>Story points <input name="story_points" type="number" min="1" max="100" step="1" inputmode="numeric" placeholder="Optional"></label>
+            <label>Assignee <select name="assignee_id"><option value="">Unassigned</option></select></label>
+            <label>Sprint <select name="sprint_id"><option value="">Backlog</option></select></label>
+            <button class="button primary" type="submit">Create work item</button>
+          </form>
+
+          <form id="agileSprintForm" class="workbench-form agile-form" hidden>
+            <h3>Create sprint</h3>
+            <label>Sprint name <input name="name" required maxlength="80" placeholder="Sprint 1"></label>
+            <label>Goal <input name="goal" maxlength="500" placeholder="Sprint outcome"></label>
+            <label>Starts <input name="starts_on" type="date"></label>
+            <label>Ends <input name="ends_on" type="date"></label>
+            <button class="button secondary" type="submit">Create sprint</button>
+          </form>
+        </div>
+        <p class="muted-copy agile-permissions">VIEWER accounts can read the board. ADMIN and OPERATOR accounts can manage sprints and work items; only ADMIN accounts can delete work items.</p>
       </section>
 
       <section class="content-grid intelligence-grid">

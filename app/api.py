@@ -31,12 +31,69 @@ DEMO_DRONES = [
     {'drone_id': f'SP-DRONE-{number:02d}', 'color': color}
     for number, color in enumerate(DRONE_COLORS, start=1)
 ]
+BENGALURU_DEMO_DELIVERIES = [
+    {
+        'drone_id': 'BLR-DEMO-01',
+        'delivery_id': 'BLR-DEMO-DELIVERY-01',
+        'area': 'Indiranagar',
+        'position': {'latitude': 12.9719, 'longitude': 77.6412},
+        'pickup': {'latitude': 12.9730, 'longitude': 77.6404},
+        'destination': {'latitude': 12.9678, 'longitude': 77.6419},
+        'status': 'IN_TRANSIT',
+        'color': '#22d3ee',
+    },
+    {
+        'drone_id': 'BLR-DEMO-02',
+        'delivery_id': 'BLR-DEMO-DELIVERY-02',
+        'area': 'MG Road',
+        'position': {'latitude': 12.9757, 'longitude': 77.6033},
+        'pickup': {'latitude': 12.9751, 'longitude': 77.6053},
+        'destination': {'latitude': 12.9694, 'longitude': 77.6102},
+        'status': 'PICKUP_CONFIRMED',
+        'color': '#a78bfa',
+    },
+    {
+        'drone_id': 'BLR-DEMO-03',
+        'delivery_id': 'BLR-DEMO-DELIVERY-03',
+        'area': 'Koramangala',
+        'position': {'latitude': 12.9349, 'longitude': 77.6148},
+        'pickup': {'latitude': 12.9354, 'longitude': 77.6135},
+        'destination': {'latitude': 12.9387, 'longitude': 77.6171},
+        'status': 'ASSIGNED',
+        'color': '#fbbf24',
+    },
+    {
+        'drone_id': 'BLR-DEMO-04',
+        'delivery_id': 'BLR-DEMO-DELIVERY-04',
+        'area': 'Jayanagar',
+        'position': {'latitude': 12.9250, 'longitude': 77.5838},
+        'pickup': {'latitude': 12.9241, 'longitude': 77.5835},
+        'destination': {'latitude': 12.9302, 'longitude': 77.5846},
+        'status': 'IN_TRANSIT',
+        'color': '#4ade80',
+    },
+    {
+        'drone_id': 'BLR-DEMO-05',
+        'delivery_id': 'BLR-DEMO-DELIVERY-05',
+        'area': 'Malleshwaram',
+        'position': {'latitude': 13.0039, 'longitude': 77.5700},
+        'pickup': {'latitude': 13.0044, 'longitude': 77.5710},
+        'destination': {'latitude': 12.9978, 'longitude': 77.5709},
+        'status': 'ARRIVED',
+        'color': '#fb7185',
+    },
+]
+BENGALURU_DEMO_HEAT_CELL_SIZE = 0.005
 STALE_AFTER_SECONDS = 120
 MAX_TRAFFIC_SAMPLES = 5000
 MAX_PATH_POINTS = 100
+MAX_NOTIFICATION_RETRIES = 3
 RATE_LIMITS = {}
 _RETENTION_LOCK = threading.Lock()
 _LAST_RETENTION_PRUNE = 0.0
+METRIC_DELIVERY_STATES = ('CREATED', 'ASSIGNED', 'PICKUP_CONFIRMED', 'IN_TRANSIT', 'ARRIVED', 'DELIVERED', 'CANCELLED', 'FAILED')
+METRIC_OUTBOX_STATES = ('PENDING', 'PROCESSING', 'SENT', 'FAILED')
+METRIC_REJECTION_REASONS = ('duplicate_or_out_of_order', 'implausible_speed', 'invalid_payload', 'stale_sample', 'unauthorized_device', 'other')
 DEFAULT_TWIN_CONFIG = {
     'corridors': [{
         'id': 'CORRIDOR-CENTRAL',
@@ -106,6 +163,276 @@ def _prune_expired_telemetry_if_due(force=False):
 
 def list_tables():
     return store.list_tables()
+
+
+def readiness_status():
+    try:
+        conn = store.get_connection()
+        try:
+            version = conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] or 0
+            required_tables = {
+                'drone_registrations',
+                'telemetry_samples',
+                'deliveries',
+                'notification_outbox',
+                'device_credentials',
+                'admin_users',
+                'admin_sessions',
+                'simulation_runs',
+                'agile_sprints',
+                'agile_tasks',
+            }
+            present = {
+                row['name'] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            missing = sorted(required_tables - present)
+            if version < 5 or missing:
+                return 503, {
+                    'status': 'unready',
+                    'storage': {
+                        'ok': False,
+                        'schema_version': version,
+                        'missing_tables': missing,
+                    },
+                }
+            pending_notifications = conn.execute(
+                "SELECT COUNT(*) FROM notification_outbox WHERE state IN ('PENDING','FAILED')"
+            ).fetchone()[0]
+            return 200, {
+                'status': 'ok',
+                'storage': {
+                    'ok': True,
+                    'schema_version': version,
+                },
+                'notifications': {
+                    'pending_or_retryable': pending_notifications,
+                },
+            }
+        finally:
+            conn.close()
+    except (OSError, sqlite3.DatabaseError, ValueError):
+        return 503, {
+            'status': 'unready',
+            'storage': {
+                'ok': False,
+                'error': 'storage unavailable',
+            },
+        }
+
+
+def prometheus_metrics(request_counts=None, uptime_seconds=None):
+    lines = [
+        '# HELP stormpilot_requests_total Business HTTP requests.',
+        '# TYPE stormpilot_requests_total counter',
+    ]
+    for (route, code), count in sorted(request_counts or []):
+        lines.append(
+            f'stormpilot_requests_total{{route="{_metric_label(route)}",status="{_metric_label(code)}"}} {int(count)}'
+        )
+    if uptime_seconds is not None:
+        lines.extend([
+            '# HELP stormpilot_uptime_seconds Process uptime.',
+            '# TYPE stormpilot_uptime_seconds gauge',
+            f'stormpilot_uptime_seconds {float(uptime_seconds):.3f}',
+        ])
+
+    status, readiness = readiness_status()
+    lines.extend([
+        '# HELP stormpilot_ready Storage readiness status.',
+        '# TYPE stormpilot_ready gauge',
+        f'stormpilot_ready {1 if status == 200 else 0}',
+    ])
+
+    try:
+        snapshot = _metrics_snapshot()
+    except (OSError, sqlite3.DatabaseError, ValueError):
+        lines.extend([
+            '# HELP stormpilot_storage_available Storage metrics collection status.',
+            '# TYPE stormpilot_storage_available gauge',
+            'stormpilot_storage_available 0',
+        ])
+        return '\n'.join(lines) + '\n'
+
+    lines.extend([
+        '# HELP stormpilot_storage_available Storage metrics collection status.',
+        '# TYPE stormpilot_storage_available gauge',
+        'stormpilot_storage_available 1',
+        '# HELP stormpilot_telemetry_samples_total Persisted telemetry samples by acceptance status.',
+        '# TYPE stormpilot_telemetry_samples_total counter',
+    ])
+    for status_name in ('ACCEPTED', 'REJECTED'):
+        lines.append(f'stormpilot_telemetry_samples_total{{status="{status_name.lower()}"}} {snapshot["telemetry_status"].get(status_name, 0)}')
+    lines.extend([
+        '# HELP stormpilot_telemetry_rejected_total Rejected telemetry by bounded reason.',
+        '# TYPE stormpilot_telemetry_rejected_total counter',
+    ])
+    for reason in METRIC_REJECTION_REASONS:
+        lines.append(f'stormpilot_telemetry_rejected_total{{reason="{reason}"}} {snapshot["telemetry_rejections"].get(reason, 0)}')
+    lines.extend([
+        '# HELP stormpilot_connected_drones Fresh phone GPS drone count.',
+        '# TYPE stormpilot_connected_drones gauge',
+        f'stormpilot_connected_drones {snapshot["connected_drones"]}',
+        '# HELP stormpilot_stale_devices Active devices without recent telemetry.',
+        '# TYPE stormpilot_stale_devices gauge',
+        f'stormpilot_stale_devices {snapshot["stale_devices"]}',
+        '# HELP stormpilot_deliveries_total Deliveries by bounded state.',
+        '# TYPE stormpilot_deliveries_total gauge',
+    ])
+    for state in METRIC_DELIVERY_STATES:
+        lines.append(f'stormpilot_deliveries_total{{state="{state.lower()}"}} {snapshot["deliveries"].get(state, 0)}')
+    lines.extend([
+        '# HELP stormpilot_notifications_total Notification outbox rows by bounded state.',
+        '# TYPE stormpilot_notifications_total gauge',
+    ])
+    for state in METRIC_OUTBOX_STATES:
+        lines.append(f'stormpilot_notifications_total{{state="{state.lower()}"}} {snapshot["notifications"].get(state, 0)}')
+    lines.extend([
+        '# HELP stormpilot_notification_exhausted_total Notifications that exhausted retry budget.',
+        '# TYPE stormpilot_notification_exhausted_total gauge',
+        f'stormpilot_notification_exhausted_total {snapshot["notification_exhausted"]}',
+        '# HELP stormpilot_optimizer_proposals_total Stored optimizer proposals.',
+        '# TYPE stormpilot_optimizer_proposals_total counter',
+        f'stormpilot_optimizer_proposals_total {snapshot["optimizer_proposals"]}',
+        '# HELP stormpilot_optimizer_applied_total Applied optimizer proposals.',
+        '# TYPE stormpilot_optimizer_applied_total counter',
+        f'stormpilot_optimizer_applied_total {snapshot["optimizer_applied"]}',
+        '# HELP stormpilot_optimizer_rejections_total Optimizer apply rejections recorded by audit event.',
+        '# TYPE stormpilot_optimizer_rejections_total counter',
+        f'stormpilot_optimizer_rejections_total {snapshot["optimizer_rejections"]}',
+        '# HELP stormpilot_simulation_runs_total Stored what-if scenario runs by state.',
+        '# TYPE stormpilot_simulation_runs_total counter',
+        f'stormpilot_simulation_runs_total{{state="stored"}} {snapshot["simulation_runs"]}',
+        f'stormpilot_simulation_runs_total{{state="applied"}} {snapshot["simulation_applied"]}',
+        '# HELP stormpilot_auth_throttled_keys Login throttle keys currently locked.',
+        '# TYPE stormpilot_auth_throttled_keys gauge',
+        f'stormpilot_auth_throttled_keys {snapshot["auth_throttled"]}',
+        '# HELP stormpilot_delivery_completions_total Recorded delivery handover completions.',
+        '# TYPE stormpilot_delivery_completions_total counter',
+        f'stormpilot_delivery_completions_total {snapshot["delivery_completions"]}',
+        '# HELP stormpilot_login_failures_total Recorded administrator login failures.',
+        '# TYPE stormpilot_login_failures_total counter',
+        f'stormpilot_login_failures_total {snapshot["login_failures"]}',
+    ])
+    return '\n'.join(lines) + '\n'
+
+
+def _metrics_snapshot():
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(seconds=STALE_AFTER_SECONDS)).isoformat().replace('+00:00', 'Z')
+    future = (now + timedelta(seconds=30)).isoformat().replace('+00:00', 'Z')
+    conn = store.get_connection()
+    try:
+        telemetry_status = {
+            row['status']: row['count']
+            for row in conn.execute(
+                'SELECT status, COUNT(*) AS count FROM telemetry_samples GROUP BY status'
+            ).fetchall()
+        }
+        rejection_counts = {reason: 0 for reason in METRIC_REJECTION_REASONS}
+        for row in conn.execute(
+            "SELECT COALESCE(rejection_reason, 'other') AS reason, COUNT(*) AS count "
+            "FROM telemetry_samples WHERE status = 'REJECTED' GROUP BY COALESCE(rejection_reason, 'other')"
+        ).fetchall():
+            reason = row['reason'] if row['reason'] in rejection_counts else 'other'
+            rejection_counts[reason] += row['count']
+        delivery_counts = {
+            row['status']: row['count']
+            for row in conn.execute(
+                'SELECT status, COUNT(*) AS count FROM deliveries GROUP BY status'
+            ).fetchall()
+        }
+        notification_counts = {
+            row['state']: row['count']
+            for row in conn.execute(
+                'SELECT state, COUNT(*) AS count FROM notification_outbox GROUP BY state'
+            ).fetchall()
+        }
+        connected_drones = conn.execute(
+            """
+            SELECT COUNT(DISTINCT drone_id) FROM telemetry_samples
+            WHERE status = 'ACCEPTED'
+                AND datetime(server_received_at) >= datetime(?)
+                AND datetime(device_timestamp) >= datetime(?)
+                AND datetime(server_received_at) <= datetime(?)
+                AND datetime(device_timestamp) <= datetime(?)
+            """,
+            (cutoff, cutoff, future, future),
+        ).fetchone()[0]
+        stale_devices = conn.execute(
+            """
+            SELECT COUNT(*) FROM device_registrations
+            WHERE status = 'active'
+                AND (last_seen IS NULL OR datetime(last_seen) < datetime(?))
+            """,
+            (cutoff,),
+        ).fetchone()[0]
+        notification_exhausted = conn.execute(
+            "SELECT COUNT(*) FROM notification_outbox WHERE state = 'FAILED' AND retry_count >= ?",
+            (MAX_NOTIFICATION_RETRIES,),
+        ).fetchone()[0]
+        optimizer_proposals = conn.execute(
+            "SELECT COUNT(*) FROM simulation_runs WHERE scenario_type = 'OPTIMIZATION_PROPOSAL'"
+        ).fetchone()[0]
+        optimizer_applied = conn.execute(
+            "SELECT COUNT(*) FROM simulation_runs WHERE scenario_type = 'OPTIMIZATION_PROPOSAL' AND applied_at IS NOT NULL"
+        ).fetchone()[0]
+        optimizer_rejections = conn.execute(
+            "SELECT COUNT(*) FROM event_log WHERE event_type = 'OPTIMIZER_REJECTED'"
+        ).fetchone()[0]
+        simulation_runs = conn.execute(
+            "SELECT COUNT(*) FROM simulation_runs WHERE scenario_type != 'OPTIMIZATION_PROPOSAL'"
+        ).fetchone()[0]
+        simulation_applied = conn.execute(
+            "SELECT COUNT(*) FROM simulation_runs WHERE scenario_type != 'OPTIMIZATION_PROPOSAL' AND applied_at IS NOT NULL"
+        ).fetchone()[0]
+        auth_throttled = conn.execute(
+            'SELECT COUNT(*) FROM admin_login_attempts WHERE locked_until IS NOT NULL AND locked_until > ?',
+            (_utc_now(),),
+        ).fetchone()[0]
+        delivery_completions = conn.execute(
+            "SELECT COUNT(*) FROM event_log WHERE event_type = 'DELIVERY_CONFIRMED'"
+        ).fetchone()[0]
+        login_failures = conn.execute(
+            "SELECT COUNT(*) FROM event_log WHERE event_type = 'ADMIN_LOGIN_FAILED'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        'telemetry_status': telemetry_status,
+        'telemetry_rejections': rejection_counts,
+        'connected_drones': connected_drones,
+        'stale_devices': stale_devices,
+        'deliveries': delivery_counts,
+        'notifications': notification_counts,
+        'notification_exhausted': notification_exhausted,
+        'optimizer_proposals': optimizer_proposals,
+        'optimizer_applied': optimizer_applied,
+        'optimizer_rejections': optimizer_rejections,
+        'simulation_runs': simulation_runs,
+        'simulation_applied': simulation_applied,
+        'auth_throttled': auth_throttled,
+        'delivery_completions': delivery_completions,
+        'login_failures': login_failures,
+    }
+
+
+def _metric_label(value):
+    return str(value).replace('\\', '\\\\').replace('"', '').replace('\n', '')
+
+
+def _record_event_on_connection(conn, event_type, entity_type, entity_id, payload=None):
+    conn.execute(
+        'INSERT INTO event_log(id, event_type, entity_type, entity_id, payload) VALUES (?, ?, ?, ?, ?)',
+        (
+            f'event-{secrets.token_urlsafe(18)}',
+            event_type,
+            entity_type,
+            str(entity_id),
+            json.dumps(payload or {}, separators=(',', ':'), sort_keys=True),
+        ),
+    )
 
 
 def initialize_storage(force_reset=False):
@@ -299,6 +626,51 @@ def handle(method, path, body=None, headers=None, query=''):
         status, payload, response_headers = security.logout(headers)
         return status, _attach_response_headers(payload, response_headers)
 
+    if method == 'GET' and path == '/api/agile':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'agile.read', method)
+        if error:
+            return error
+        return _agile_board()
+
+    if method == 'POST' and path == '/api/agile/sprints':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'agile.sprint.create', method)
+        if error:
+            return error
+        return _create_agile_sprint(_read_json(body), user)
+
+    if method == 'PUT' and path.startswith('/api/agile/sprints/'):
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'agile.sprint.update', method)
+        if error:
+            return error
+        sprint_id = path.rsplit('/', 1)[-1]
+        if not sprint_id:
+            return 404, {'error': 'Sprint not found.'}
+        return _transition_agile_sprint(sprint_id, _read_json(body), user)
+
+    if method == 'POST' and path == '/api/agile/tasks':
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'agile.task.create', method)
+        if error:
+            return error
+        return _create_agile_task(_read_json(body), user)
+
+    if method == 'PUT' and path.startswith('/api/agile/tasks/'):
+        user, error = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'agile.task.update', method)
+        if error:
+            return error
+        task_id = path.rsplit('/', 1)[-1]
+        if not task_id:
+            return 404, {'error': 'Work item not found.'}
+        return _update_agile_task(task_id, _read_json(body), user)
+
+    if method == 'DELETE' and path.startswith('/api/agile/tasks/'):
+        user, error = security.authorize(headers, {'ADMIN'}, 'agile.task.delete', method)
+        if error:
+            return error
+        task_id = path.rsplit('/', 1)[-1]
+        if not task_id:
+            return 404, {'error': 'Work item not found.'}
+        return _delete_agile_task(task_id, user)
+
     if method == 'GET' and path == '/api/admin/users':
         user, error = security.authorize(headers, {'ADMIN'}, 'admin.users.list', method)
         if error:
@@ -384,6 +756,9 @@ def handle(method, path, body=None, headers=None, query=''):
             'map_ready': bool(os.getenv('GOOGLE_MAPS_API_KEY', '').strip()),
         }
 
+    if method == 'GET' and path == '/api/demo/bengaluru':
+        return _bengaluru_demo_payload()
+
     if method == 'GET' and path == '/api/fleet':
         return 200, _fleet_payload()
 
@@ -421,6 +796,9 @@ def handle(method, path, body=None, headers=None, query=''):
         return _handle_delivery_confirm(body, confirmed_by=user['username'])
 
     if method == 'POST' and path == '/api/email/test':
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'email.test', method)
+        if authorization is not None:
+            return authorization
         return _handle_email_test(body)
 
     if method == 'GET' and path == '/api/redmine':
@@ -429,6 +807,294 @@ def handle(method, path, body=None, headers=None, query=''):
     if method == 'GET' and path.startswith('/api/'):
         return 404, {'error': 'not found'}
     return 404, {'error': 'not found'}
+
+
+AGILE_STATUSES = ('TODO', 'IN_PROGRESS', 'REVIEW', 'DONE')
+AGILE_PRIORITIES = ('LOW', 'NORMAL', 'HIGH', 'URGENT')
+
+
+def _agile_board():
+    conn = store.get_connection()
+    try:
+        sprints = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT sprint_id, name, goal, starts_on, ends_on, state, created_at
+                FROM agile_sprints
+                ORDER BY CASE state WHEN 'ACTIVE' THEN 0 WHEN 'PLANNED' THEN 1 ELSE 2 END,
+                         starts_on IS NULL, starts_on, created_at
+                """
+            ).fetchall()
+        ]
+        tasks = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT t.task_id, t.title, t.description, t.status, t.priority,
+                       t.story_points, t.assignee_id, u.username AS assignee,
+                       t.sprint_id, s.name AS sprint_name, t.created_by,
+                       t.created_at, t.updated_at
+                FROM agile_tasks AS t
+                LEFT JOIN admin_users AS u ON u.user_id = t.assignee_id
+                LEFT JOIN agile_sprints AS s ON s.sprint_id = t.sprint_id
+                ORDER BY CASE t.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1
+                         WHEN 'NORMAL' THEN 2 ELSE 3 END, t.created_at, t.task_id
+                """
+            ).fetchall()
+        ]
+        users = [
+            {'user_id': row['user_id'], 'username': row['username']}
+            for row in conn.execute(
+                "SELECT user_id, username FROM admin_users WHERE enabled = 1 ORDER BY username"
+            ).fetchall()
+        ]
+        counts = {status: 0 for status in AGILE_STATUSES}
+        for task in tasks:
+            counts[task['status']] += 1
+        return 200, {'sprints': sprints, 'tasks': tasks, 'users': users, 'counts': counts}
+    finally:
+        conn.close()
+
+
+def _bengaluru_demo_payload():
+    heat_counts = defaultdict(int)
+    for delivery in BENGALURU_DEMO_DELIVERIES:
+        for point in (delivery['position'], delivery['pickup'], delivery['destination']):
+            latitude_bin = math.floor(point['latitude'] / BENGALURU_DEMO_HEAT_CELL_SIZE)
+            longitude_bin = math.floor(point['longitude'] / BENGALURU_DEMO_HEAT_CELL_SIZE)
+            heat_counts[(latitude_bin, longitude_bin)] += 1
+    heat_cells = [
+        {
+            'latitude': round((latitude_bin + 0.5) * BENGALURU_DEMO_HEAT_CELL_SIZE, 6),
+            'longitude': round((longitude_bin + 0.5) * BENGALURU_DEMO_HEAT_CELL_SIZE, 6),
+            'sample_count': count,
+        }
+        for (latitude_bin, longitude_bin), count in sorted(
+            heat_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+    return 200, {
+        'city': 'Bengaluru',
+        'origin': 'SIMULATED',
+        'warning': 'Illustrative sample routes and locations only; these are not live drones, GPS telemetry, delivery orders, or flight guidance.',
+        'drones': BENGALURU_DEMO_DELIVERIES,
+        'deliveries': BENGALURU_DEMO_DELIVERIES,
+        'heat_cell_size_deg': BENGALURU_DEMO_HEAT_CELL_SIZE,
+        'heat_cells': heat_cells,
+    }
+
+
+def _validate_agile_task(payload):
+    if not isinstance(payload, dict):
+        return None, 'Expected a JSON object.'
+    title = payload.get('title')
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 160:
+        return None, 'Title must contain between 1 and 160 characters.'
+    description = payload.get('description', '')
+    if not isinstance(description, str) or len(description) > 2000:
+        return None, 'Description must be 2,000 characters or fewer.'
+    status = payload.get('status', 'TODO')
+    if status not in AGILE_STATUSES:
+        return None, 'Status must be TODO, IN_PROGRESS, REVIEW or DONE.'
+    priority = payload.get('priority', 'NORMAL')
+    if priority not in AGILE_PRIORITIES:
+        return None, 'Priority must be LOW, NORMAL, HIGH or URGENT.'
+    story_points = payload.get('story_points')
+    if story_points in ('', None):
+        story_points = None
+    elif isinstance(story_points, bool) or not isinstance(story_points, int) or not 1 <= story_points <= 100:
+        return None, 'Story points must be a whole number from 1 to 100.'
+    assignee_id = payload.get('assignee_id') or None
+    sprint_id = payload.get('sprint_id') or None
+    if assignee_id is not None and (not isinstance(assignee_id, str) or len(assignee_id) > 64):
+        return None, 'Assignee is invalid.'
+    if sprint_id is not None and (not isinstance(sprint_id, str) or len(sprint_id) > 64):
+        return None, 'Sprint is invalid.'
+    return {
+        'title': title.strip(),
+        'description': description.strip(),
+        'status': status,
+        'priority': priority,
+        'story_points': story_points,
+        'assignee_id': assignee_id,
+        'sprint_id': sprint_id,
+    }, None
+
+
+def _agile_references_valid(conn, task):
+    if task['assignee_id'] and not conn.execute(
+        'SELECT 1 FROM admin_users WHERE user_id = ? AND enabled = 1', (task['assignee_id'],)
+    ).fetchone():
+        return 'Choose an enabled team member as the assignee.'
+    if task['sprint_id'] and not conn.execute(
+        'SELECT 1 FROM agile_sprints WHERE sprint_id = ?', (task['sprint_id'],)
+    ).fetchone():
+        return 'Choose an existing sprint or move the work item to the backlog.'
+    return None
+
+
+def _create_agile_task(payload, user):
+    task, error = _validate_agile_task(payload)
+    if error:
+        return 400, {'error': error}
+    task_id = secrets.token_urlsafe(18)
+    conn = store.get_connection()
+    try:
+        with conn:
+            reference_error = _agile_references_valid(conn, task)
+            if reference_error:
+                return 400, {'error': reference_error}
+            conn.execute(
+                """
+                INSERT INTO agile_tasks (
+                    task_id, title, description, status, priority, story_points,
+                    assignee_id, sprint_id, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id, task['title'], task['description'], task['status'],
+                    task['priority'], task['story_points'], task['assignee_id'],
+                    task['sprint_id'], user['user_id'],
+                ),
+            )
+            _record_event_on_connection(conn, 'AGILE_TASK_CREATED', 'AGILE_TASK', task_id, {
+                'actor': user['username'], 'status': task['status'], 'sprint_id': task['sprint_id'],
+            })
+        return 201, {'task_id': task_id}
+    finally:
+        conn.close()
+
+
+def _update_agile_task(task_id, payload, user):
+    task, error = _validate_agile_task(payload)
+    if error:
+        return 400, {'error': error}
+    conn = store.get_connection()
+    try:
+        with conn:
+            if not conn.execute('SELECT 1 FROM agile_tasks WHERE task_id = ?', (task_id,)).fetchone():
+                return 404, {'error': 'Work item not found.'}
+            reference_error = _agile_references_valid(conn, task)
+            if reference_error:
+                return 400, {'error': reference_error}
+            conn.execute(
+                """
+                UPDATE agile_tasks
+                SET title = ?, description = ?, status = ?, priority = ?, story_points = ?,
+                    assignee_id = ?, sprint_id = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                WHERE task_id = ?
+                """,
+                (
+                    task['title'], task['description'], task['status'], task['priority'],
+                    task['story_points'], task['assignee_id'], task['sprint_id'], task_id,
+                ),
+            )
+            _record_event_on_connection(conn, 'AGILE_TASK_UPDATED', 'AGILE_TASK', task_id, {
+                'actor': user['username'], 'status': task['status'], 'sprint_id': task['sprint_id'],
+            })
+        return 200, {'task_id': task_id}
+    finally:
+        conn.close()
+
+
+def _delete_agile_task(task_id, user):
+    conn = store.get_connection()
+    try:
+        with conn:
+            cursor = conn.execute('DELETE FROM agile_tasks WHERE task_id = ?', (task_id,))
+            if cursor.rowcount == 0:
+                return 404, {'error': 'Work item not found.'}
+            _record_event_on_connection(conn, 'AGILE_TASK_DELETED', 'AGILE_TASK', task_id, {
+                'actor': user['username'],
+            })
+        return 200, {'task_id': task_id, 'deleted': True}
+    finally:
+        conn.close()
+
+
+def _create_agile_sprint(payload, user):
+    if not isinstance(payload, dict):
+        return 400, {'error': 'Expected a JSON object.'}
+    name = payload.get('name')
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+        return 400, {'error': 'Sprint name must contain between 1 and 80 characters.'}
+    goal = payload.get('goal', '')
+    if not isinstance(goal, str) or len(goal) > 500:
+        return 400, {'error': 'Sprint goal must be 500 characters or fewer.'}
+    starts_on = payload.get('starts_on') or None
+    ends_on = payload.get('ends_on') or None
+    for field, value in (('start date', starts_on), ('end date', ends_on)):
+        if value is not None:
+            try:
+                if not isinstance(value, str) or datetime.strptime(value, '%Y-%m-%d').date().isoformat() != value:
+                    raise ValueError
+            except ValueError:
+                return 400, {'error': f'Sprint {field} must be a valid date in YYYY-MM-DD format.'}
+    if starts_on and ends_on and starts_on > ends_on:
+        return 400, {'error': 'Sprint end date must be on or after its start date.'}
+
+    sprint_id = secrets.token_urlsafe(18)
+    conn = store.get_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        with conn:
+            active_exists = conn.execute(
+                "SELECT 1 FROM agile_sprints WHERE state = 'ACTIVE' LIMIT 1"
+            ).fetchone()
+            state = 'PLANNED' if active_exists else 'ACTIVE'
+            conn.execute(
+                """
+                INSERT INTO agile_sprints (sprint_id, name, goal, starts_on, ends_on, state, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (sprint_id, name.strip(), goal.strip(), starts_on, ends_on, state, user['user_id']),
+            )
+            _record_event_on_connection(conn, 'AGILE_SPRINT_CREATED', 'AGILE_SPRINT', sprint_id, {
+                'actor': user['username'], 'state': state,
+            })
+        return 201, {'sprint_id': sprint_id, 'state': state}
+    except sqlite3.IntegrityError:
+        return 409, {'error': 'A sprint with that name already exists or another sprint became active.'}
+    finally:
+        conn.close()
+
+
+def _transition_agile_sprint(sprint_id, payload, user):
+    if not isinstance(payload, dict) or set(payload) != {'action'}:
+        return 400, {'error': 'Provide a sprint action: start or complete.'}
+    action = payload['action']
+    if action not in ('start', 'complete'):
+        return 400, {'error': 'Sprint action must be start or complete.'}
+
+    conn = store.get_connection()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        with conn:
+            sprint = conn.execute(
+                'SELECT state FROM agile_sprints WHERE sprint_id = ?', (sprint_id,)
+            ).fetchone()
+            if sprint is None:
+                return 404, {'error': 'Sprint not found.'}
+            expected_state = 'PLANNED' if action == 'start' else 'ACTIVE'
+            next_state = 'ACTIVE' if action == 'start' else 'COMPLETED'
+            if sprint['state'] != expected_state:
+                return 409, {'error': f'Only a {expected_state.lower()} sprint can undergo this transition.'}
+            if action == 'start' and conn.execute(
+                "SELECT 1 FROM agile_sprints WHERE state = 'ACTIVE' LIMIT 1"
+            ).fetchone():
+                return 409, {'error': 'Complete the active sprint before starting another sprint.'}
+            conn.execute(
+                'UPDATE agile_sprints SET state = ? WHERE sprint_id = ?',
+                (next_state, sprint_id),
+            )
+            _record_event_on_connection(conn, f'AGILE_SPRINT_{next_state}', 'AGILE_SPRINT', sprint_id, {
+                'actor': user['username'], 'state': next_state,
+            })
+        return 200, {'sprint_id': sprint_id, 'state': next_state}
+    except sqlite3.IntegrityError:
+        return 409, {'error': 'Complete the active sprint before starting another sprint.'}
+    finally:
+        conn.close()
 
 
 def _attach_response_headers(payload, headers):
@@ -483,6 +1149,7 @@ def _apply_optimization(payload, user):
             if proposal is None:
                 return 404, {'error': 'Optimization proposal not found.'}
             if proposal['applied_at']:
+                _record_event_on_connection(conn, 'OPTIMIZER_REJECTED', 'SIMULATION', payload['optimization_id'], {'reason': 'already_applied'})
                 return 409, {'error': 'This optimization proposal has already been applied.'}
             baseline = json.loads(proposal['baseline_json'])
             result = json.loads(proposal['result_json'])
@@ -498,12 +1165,14 @@ def _apply_optimization(payload, user):
                 for row in current_deliveries
             }
             if expected != observed:
+                _record_event_on_connection(conn, 'OPTIMIZER_REJECTED', 'SIMULATION', proposal['scenario_id'], {'reason': 'stale_baseline'})
                 return 409, {'error': 'Live delivery assignments changed since this proposal; optimize again before applying.'}
             current_snapshot = optimizer.capture_snapshot()
             current_states = {item['drone_id']: item['state'] for item in current_snapshot['drones']}
             proposed = result.get('recommended_assignments', [])
             for item in proposed:
                 if item['drone_id'] in current_states and current_states[item['drone_id']] != 'PHONE_GPS':
+                    _record_event_on_connection(conn, 'OPTIMIZER_REJECTED', 'SIMULATION', proposal['scenario_id'], {'reason': 'drone_not_connected'})
                     return 409, {'error': f"Drone {item['drone_id']} is no longer connected; optimize again."}
             updated_count = 0
             for assignment in proposed:
@@ -1933,36 +2602,58 @@ def _handle_device_register(body):
     digest = _hash_secret(secret, salt)
     conn = store.get_connection()
     try:
-        conn.execute(
-            '''
-            INSERT INTO device_credentials (device_id, drone_id, secret_hash, secret_salt, status, created_at, updated_at, expires_at)
-            VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET
-                drone_id = excluded.drone_id,
-                secret_hash = excluded.secret_hash,
-                secret_salt = excluded.secret_salt,
-                status = 'ACTIVE',
-                updated_at = excluded.updated_at,
-                expires_at = excluded.expires_at,
-                revoked_reason = NULL
-            ''',
-            (device_id, drone_id, digest, salt, _utc_now(), _utc_now(), _utc_now_plus_days(30)),
-        )
-        conn.execute(
-            '''
-            INSERT INTO device_registrations (device_id, drone_id, status, source, created_at, updated_at, last_seen, expires_at)
-            VALUES (?, ?, 'active', 'PHONE_GPS', ?, ?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET
-                drone_id = excluded.drone_id,
-                status = 'active',
-                source = excluded.source,
-                updated_at = excluded.updated_at,
-                last_seen = excluded.last_seen,
-                expires_at = excluded.expires_at
-            ''',
-            (device_id, drone_id, _utc_now(), _utc_now(), _utc_now(), _utc_now_plus_days(30)),
-        )
-        conn.commit()
+        existing_credential = conn.execute(
+            'SELECT drone_id, status FROM device_credentials WHERE device_id = ?',
+            (device_id,),
+        ).fetchone()
+        existing_registration = conn.execute(
+            'SELECT drone_id, status FROM device_registrations WHERE device_id = ?',
+            (device_id,),
+        ).fetchone()
+        for existing in (existing_credential, existing_registration):
+            if (
+                existing is not None
+                and str(existing['status']).upper() in {'ACTIVE', 'ACTIVE'.lower()}
+                and existing['drone_id'] != drone_id
+            ):
+                return 409, {
+                    'error': 'Device is already assigned to another drone. Revoke it before re-enrollment.',
+                    'device_id': device_id,
+                }
+
+        now = _utc_now()
+        expires_at = _utc_now_plus_days(30)
+        with conn:
+            conn.execute(
+                '''
+                INSERT INTO device_credentials (device_id, drone_id, secret_hash, secret_salt, status, created_at, updated_at, expires_at)
+                VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    drone_id = excluded.drone_id,
+                    secret_hash = excluded.secret_hash,
+                    secret_salt = excluded.secret_salt,
+                    status = 'ACTIVE',
+                    updated_at = excluded.updated_at,
+                    expires_at = excluded.expires_at,
+                    revoked_reason = NULL
+                ''',
+                (device_id, drone_id, digest, salt, now, now, expires_at),
+            )
+            conn.execute(
+                '''
+                INSERT INTO device_registrations (device_id, drone_id, status, source, created_at, updated_at, last_seen, expires_at)
+                VALUES (?, ?, 'active', 'PHONE_GPS', ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    drone_id = excluded.drone_id,
+                    status = 'active',
+                    source = excluded.source,
+                    updated_at = excluded.updated_at,
+                    last_seen = excluded.last_seen,
+                    expires_at = excluded.expires_at,
+                    revocation_reason = NULL
+                ''',
+                (device_id, drone_id, now, now, now, expires_at),
+            )
         store.record_event('DEVICE_REGISTERED', 'DEVICE', device_id, {
             'drone_id': drone_id,
             'actor': 'administrator',
@@ -2075,6 +2766,12 @@ def _handle_email_test(body):
     data = _read_json(body) if body else {}
     if not isinstance(data, dict):
         data = {}
+
+    if _smtp_local_test_mode():
+        return 200, {
+            'status': 'local_test',
+            'message': 'SMTP local test mode is enabled; no external email was sent.',
+        }
 
     smtp_host = os.getenv('SMTP_HOST', '').strip()
     smtp_port = int(os.getenv('SMTP_PORT', '587').strip() or '587')
@@ -2310,14 +3007,94 @@ def enqueue_notification(notification_type, entity_id, payload=None, delivery_id
         conn.close()
 
 
+def _smtp_local_test_mode():
+    return os.getenv('SMTP_LOCAL_TEST_MODE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _notification_subject(row):
+    label = str(row['notification_type']).replace('_', ' ').title()
+    if row['delivery_id']:
+        return f"StormPilot: {label} {row['delivery_id']}"
+    return f"StormPilot: {label}"
+
+
+def _notification_email_body(conn, outbox_row, payload):
+    lines = [
+        'StormPilot notification',
+        f"Type: {outbox_row['notification_type']}",
+        f"Entity ID: {outbox_row['entity_id']}",
+    ]
+    delivery_id = outbox_row['delivery_id']
+    if delivery_id:
+        delivery = conn.execute(
+            'SELECT * FROM deliveries WHERE delivery_id = ?',
+            (delivery_id,),
+        ).fetchone()
+        if delivery is not None:
+            device = conn.execute(
+                """
+                SELECT device_id FROM telemetry_samples
+                WHERE drone_id = ? AND status = 'ACCEPTED' AND device_id IS NOT NULL
+                ORDER BY device_timestamp DESC, id DESC LIMIT 1
+                """,
+                (delivery['drone_id'],),
+            ).fetchone()
+            if device is None:
+                device = conn.execute(
+                    """
+                    SELECT device_id FROM device_registrations
+                    WHERE drone_id = ? ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (delivery['drone_id'],),
+                ).fetchone()
+            device_id = device['device_id'] if device is not None else 'unavailable'
+            lines.extend([
+                '',
+                'Verified delivery data:',
+                f"Delivery ID: {delivery['delivery_id']}",
+                f"Delivery status: {delivery['status']}",
+                f"Drone ID: {delivery['drone_id']}",
+                f"Device ID: {device_id}",
+                f"Observed distance (km): {round(float(delivery['actual_observed_km'] or 0), 3)}",
+                f"Completed at: {delivery['delivered_at'] or 'unavailable'}",
+                f"Arrival detected at: {delivery['arrival_detected_at'] or 'unavailable'}",
+                f"Handover confirmed: {'yes' if delivery['handover_confirmed'] else 'no'}",
+            ])
+        else:
+            lines.extend(['', f'Persisted delivery record was not found for {delivery_id}.'])
+    public_payload = _public_notification_payload(payload)
+    if public_payload:
+        lines.extend([
+            '',
+            'Additional non-secret payload:',
+            json.dumps(public_payload, indent=2, sort_keys=True),
+        ])
+    lines.extend([
+        '',
+        'No SMTP password, device bearer token, session cookie or CSRF token is included in this message.',
+    ])
+    return '\n'.join(lines)
+
+
+def _public_notification_payload(payload):
+    if not isinstance(payload, dict):
+        return {}
+    blocked = ('password', 'token', 'secret', 'credential', 'authorization', 'cookie', 'csrf', 'to')
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if not any(fragment in str(key).lower() for fragment in blocked)
+    }
+
+
 def process_notification_outbox(max_jobs=10):
     conn = store.get_connection()
     processed = []
     try:
         now = _utc_now()
         rows = conn.execute(
-            "SELECT * FROM notification_outbox WHERE ((state = 'PENDING' OR (state = 'FAILED' AND retry_count < 3)) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (state = 'PROCESSING' AND julianday(updated_at) < julianday('now', '-5 minutes')) ORDER BY next_attempt_at LIMIT ?",
-            (now, max_jobs),
+            "SELECT * FROM notification_outbox WHERE ((state = 'PENDING' OR (state = 'FAILED' AND retry_count < ?)) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (state = 'PROCESSING' AND julianday(updated_at) < julianday('now', '-5 minutes')) ORDER BY next_attempt_at LIMIT ?",
+            (MAX_NOTIFICATION_RETRIES, now, max_jobs),
         ).fetchall()
         for row in rows:
             with conn:
@@ -2331,6 +3108,7 @@ def process_notification_outbox(max_jobs=10):
             payload = _read_json(row['payload'])
             error = None
             try:
+                local_test_mode = _smtp_local_test_mode()
                 settings = {
                     'host': os.getenv('SMTP_HOST', '').strip(),
                     'port': int(os.getenv('SMTP_PORT', '587').strip() or '587'),
@@ -2338,22 +3116,23 @@ def process_notification_outbox(max_jobs=10):
                     'password': os.getenv('SMTP_APP_PASSWORD', '').strip(),
                 }
                 recipient = str(payload.get('to') or os.getenv('DELIVERY_NOTIFICATION_TO', '')).strip()
-                if not all((settings['host'], settings['username'], settings['password'])):
+                if not local_test_mode and not all((settings['host'], settings['username'], settings['password'])):
                     raise ValueError('SMTP not configured')
                 if not recipient:
-                    raise ValueError('notification recipient not configured')
+                    if local_test_mode:
+                        recipient = 'local-test@example.invalid'
+                    else:
+                        raise ValueError('notification recipient not configured')
                 message = EmailMessage()
-                message['Subject'] = f"StormPilot: {row['notification_type'].replace('_', ' ').title()}"
-                message['From'] = settings['username']
+                message['Subject'] = _notification_subject(row)
+                message['From'] = settings['username'] or 'stormpilot-local@example.invalid'
                 message['To'] = recipient
-                message.set_content(
-                    f"StormPilot notification for {row['entity_id']}.\n\n"
-                    f"{json.dumps(payload, indent=2, sort_keys=True)}"
-                )
-                with smtplib.SMTP(settings['host'], settings['port'], timeout=10) as smtp:
-                    smtp.starttls(context=ssl.create_default_context())
-                    smtp.login(settings['username'], settings['password'])
-                    smtp.send_message(message)
+                message.set_content(_notification_email_body(conn, row, payload))
+                if not local_test_mode:
+                    with smtplib.SMTP(settings['host'], settings['port'], timeout=10) as smtp:
+                        smtp.starttls(context=ssl.create_default_context())
+                        smtp.login(settings['username'], settings['password'])
+                        smtp.send_message(message)
             except (OSError, smtplib.SMTPException, ValueError) as exc:
                 error = str(exc) if isinstance(exc, ValueError) else 'SMTP delivery failed'
 

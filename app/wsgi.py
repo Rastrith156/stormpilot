@@ -45,8 +45,11 @@ def application(environ, start_response):
         response_headers = payload.pop('_response_headers', []) if isinstance(payload, dict) else []
         content_type = 'application/json'
         _count('api', status)
-    elif path in ('/healthz', '/readyz'):
+    elif path == '/healthz':
         payload, content_type = {'status': 'ok'}, 'application/json'
+    elif path == '/readyz':
+        status, payload = api.readiness_status()
+        content_type = 'application/json'
     elif path == '/':
         payload = {
             'project': 'StormPilot', 'mission': 'Drone delivery operations',
@@ -111,12 +114,4 @@ def _count(route, status):
 def _metrics():
     with LOCK:
         snapshot = list(COUNTS.items())
-    lines = ['# HELP stormpilot_requests_total Business HTTP requests.',
-             '# TYPE stormpilot_requests_total counter']
-    for (route, code), count in sorted(snapshot):
-        safe_route = route.replace('"', '')
-        lines.append(f'stormpilot_requests_total{{route="{safe_route}",status="{code}"}} {count}')
-    lines.extend(['# HELP stormpilot_uptime_seconds Process uptime.',
-                  '# TYPE stormpilot_uptime_seconds gauge',
-                  f'stormpilot_uptime_seconds {time.monotonic() - START:.3f}'])
-    return '\n'.join(lines) + '\n'
+    return api.prometheus_metrics(snapshot, time.monotonic() - START)

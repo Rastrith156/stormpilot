@@ -3,4 +3,5 @@ __pycache__/
 .env
 evidence/
 data/
+.stormpilot_data/
 secrets/

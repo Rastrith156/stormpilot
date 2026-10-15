@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StormPilot | Drone connect</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="connect-page">
@@ -33,9 +34,14 @@
       <div id="authStatus" class="status-block warning" role="status">Checking administrator session.</div>
       <div id="geoStatus" class="status-block" role="status">Awaiting geolocation permission.</div>
       <div class="telemetry-summary">
+        <div><strong id="permissionValue">Unknown</strong><span>GPS permission</span></div>
+        <div><strong id="connectionValue">Not connected</strong><span>Device connection</span></div>
+        <div><strong id="deliveryValue">Unavailable</strong><span>Delivery status</span></div>
         <div><strong id="latValue">—</strong><span>Latitude</span></div>
         <div><strong id="lngValue">—</strong><span>Longitude</span></div>
         <div><strong id="accuracyValue">—</strong><span>Accuracy</span></div>
+        <div><strong id="lastFixValue">No fix</strong><span>Last fix time</span></div>
+        <div><strong id="backendValue">Idle</strong><span>Backend status</span></div>
       </div>
       <div class="inline-actions">
         <a class="button secondary" href="/ui">Open fleet dashboard / sign in</a>
@@ -51,9 +57,29 @@
     let deviceToken = null;
     let sendInFlight = false;
 
+    function setText(id, value) {
+      document.getElementById(id).textContent = value;
+    }
+
+    function formatFixTime(value) {
+      const time = new Date(value);
+      return Number.isNaN(time.getTime()) ? 'Invalid fix' : time.toLocaleTimeString();
+    }
+
     function setStatus(message, type = 'info') {
       geoStatus.className = `status-block ${type}`;
       geoStatus.textContent = message;
+    }
+
+    async function updatePermissionStatus() {
+      if (!navigator.permissions?.query) return;
+      try {
+        const permission = await navigator.permissions.query({name: 'geolocation'});
+        setText('permissionValue', permission.state);
+        permission.onchange = () => setText('permissionValue', permission.state);
+      } catch {
+        setText('permissionValue', 'Browser managed');
+      }
     }
 
     function csrfToken() {
@@ -61,9 +87,22 @@
       return entry ? decodeURIComponent(entry.slice('stormpilot_csrf='.length)) : '';
     }
 
+    async function refreshDeliveryStatus(droneId) {
+      try {
+        const response = await fetch('/api/fleet', {cache: 'no-store'});
+        const fleet = await response.json();
+        if (!response.ok) throw new Error(fleet.error || 'Fleet unavailable');
+        const drone = fleet.drones.find(item => item.drone_id === droneId);
+        setText('deliveryValue', drone?.delivery_status || 'No active delivery');
+      } catch {
+        setText('deliveryValue', 'Unavailable');
+      }
+    }
+
     async function sendTelemetry(position) {
       if (sendInFlight || !deviceToken) return;
       sendInFlight = true;
+      const fixAgeMs = Date.now() - Number(position.timestamp || 0);
       const payload = {
         device_id: document.getElementById('deviceId').value.trim(),
         drone_id: document.getElementById('droneId').value,
@@ -75,6 +114,16 @@
       document.getElementById('latValue').textContent = payload.lat.toFixed(5);
       document.getElementById('lngValue').textContent = payload.lng.toFixed(5);
       document.getElementById('accuracyValue').textContent = `${Math.round(payload.accuracy)} m`;
+      setText('lastFixValue', formatFixTime(position.timestamp));
+      setText('connectionValue', 'Sending');
+      setText('backendValue', 'Pending');
+      if (fixAgeMs > 30000) {
+        setText('connectionValue', 'Stale fix ignored');
+        setText('backendValue', 'Not sent');
+        setStatus('Browser returned a stale GPS fix; waiting for a fresh location.', 'warning');
+        sendInFlight = false;
+        return;
+      }
 
       try {
         const response = await fetch('/api/device/telemetry', {
@@ -94,8 +143,14 @@
           }
           throw new Error(data.error || 'Telemetry rejected');
         }
-        setStatus(`Telemetry accepted for ${payload.drone_id}.`, 'success');
+        setText('connectionValue', 'Connected');
+        setText('backendValue', data.status || 'Accepted');
+        const accuracyWarning = payload.accuracy > 25 ? ' Reported accuracy is low; distance may be marked low-confidence.' : '';
+        setStatus(`Telemetry accepted for ${payload.drone_id}.${accuracyWarning}`, payload.accuracy > 25 ? 'warning' : 'success');
+        refreshDeliveryStatus(payload.drone_id);
       } catch (error) {
+        setText('connectionValue', deviceToken ? 'Rejected' : 'Revoked');
+        setText('backendValue', 'Rejected');
         setStatus(error instanceof Error ? error.message : 'Telemetry request failed.', 'error');
       } finally {
         sendInFlight = false;
@@ -105,9 +160,11 @@
     connectForm.addEventListener('submit', async event => {
       event.preventDefault();
       if (!navigator.geolocation) {
+        setText('permissionValue', 'Unavailable');
         setStatus('Geolocation is unavailable in this browser.', 'error');
         return;
       }
+      updatePermissionStatus();
       const deviceId = document.getElementById('deviceId').value.trim();
       const droneId = document.getElementById('droneId').value;
       const tokenKey = `stormpilot:${droneId}:${deviceId}`;
@@ -131,17 +188,22 @@
           if (!response.ok) throw new Error(data.error || `Device enrollment failed (${response.status}).`);
           deviceToken = data.token;
           sessionStorage.setItem(tokenKey, deviceToken);
+          setText('connectionValue', 'Enrolled');
         } catch (error) {
           setStatus(error instanceof Error ? error.message : 'Device enrollment failed.', 'error');
           trackButton.disabled = false;
+          setText('connectionValue', 'Enrollment failed');
           return;
         }
+      } else {
+        setText('connectionValue', 'Saved token');
       }
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
       setStatus('Requesting geolocation permission…');
       trackButton.disabled = true;
       watchId = navigator.geolocation.watchPosition(
         position => {
+          setText('permissionValue', 'granted');
           sendTelemetry(position);
           trackButton.textContent = 'Tracking';
         },
@@ -151,6 +213,9 @@
             2: 'Location information is unavailable at the moment.',
             3: 'The request to retrieve location timed out.'
           }[error.code] || 'Unable to read the device location.';
+          setText('permissionValue', error.code === 1 ? 'denied' : 'unavailable');
+          setText('connectionValue', 'Waiting');
+          setText('backendValue', 'No fix');
           setStatus(message, 'error');
           trackButton.disabled = false;
         },
@@ -172,6 +237,7 @@
       .catch(() => {
         document.getElementById('authStatus').textContent = 'Administrator session status is unavailable. Existing device telemetry can still be used.';
       });
+    updatePermissionStatus();
   </script>
 </body>
 </html>

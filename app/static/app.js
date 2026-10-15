@@ -27,6 +27,13 @@ const mapState = {
   twinOverlays: [],
   twinSignature: null,
   heatCells: new Map(),
+  bengaluruDemo: null,
+  demoMarkers: new Map(),
+  demoRoutes: new Map(),
+  demoDeliveryMarkers: new Map(),
+  demoHeatCells: new Map(),
+  fallbackBounds: {south: 12.9, west: 77.55, north: 13.04, east: 77.66},
+  fallbackMapSignature: null,
   replayPath: null,
   replayMarker: null,
   replayPlannedPath: null,
@@ -252,13 +259,110 @@ function googlePosition(point) {
 function ensureMap() {
   if (!mapState.mapReady || mapState.map || mapState.mapError) return;
   mapState.map = new google.maps.Map(mapElement, {
-    center: { lat: 0, lng: 0 },
-    zoom: 2,
+    center: { lat: 12.9716, lng: 77.5946 },
+    zoom: 12,
     mapTypeControl: true,
     streetViewControl: false,
     fullscreenControl: true
   });
   setMapState('success', 'Google Maps ready', 'Live GPS and backend data continue to refresh independently of the map.');
+}
+
+const BENGALURU_MAP_TILE_URL = 'https://www.openstreetmap.org/export/embed.html';
+
+function mapPoint(point) {
+  return {latitude: Number(point.latitude), longitude: Number(point.longitude)};
+}
+
+function fallbackMapPercent(point) {
+  const bounds = mapState.fallbackBounds;
+  const latitude = Number(point.latitude);
+  const longitude = Number(point.longitude);
+  return {
+    x: (longitude - bounds.west) / (bounds.east - bounds.west) * 1000,
+    y: (bounds.north - latitude) / (bounds.north - bounds.south) * 600
+  };
+}
+
+function renderBengaluruDemoList() {
+  const target = document.getElementById('bengaluruDemoList');
+  const enabled = document.getElementById('showBengaluruDemo').checked;
+  const deliveries = mapState.bengaluruDemo?.deliveries || [];
+  target.hidden = !enabled || deliveries.length === 0;
+  if (!target.hidden) {
+    target.innerHTML = `
+      <div class="bengaluru-demo-heading"><strong>SIMULATED · Bengaluru sample deliveries</strong><span>${deliveries.length} demos · no real drone GPS</span></div>
+      <div class="bengaluru-demo-items">${deliveries.map(item => `
+        <article class="bengaluru-demo-item">
+          <span class="demo-drone-dot" style="--demo-color:${escapeHTML(item.color)}"></span>
+          <div><strong>${escapeHTML(item.drone_id)} · ${escapeHTML(item.area)}</strong><span>${escapeHTML(item.delivery_id)} · ${escapeHTML(item.status.replaceAll('_', ' '))}</span></div>
+          <small>${formatNumber(item.position.latitude, 4)}, ${formatNumber(item.position.longitude, 4)}</small>
+        </article>
+      `).join('')}</div>
+    `;
+  }
+}
+
+function renderFallbackBengaluruMap() {
+  const fallback = mapElement.querySelector('.fallback-map');
+  if (!fallback || !mapState.bengaluruDemo) return;
+  const signature = JSON.stringify({
+    enabled: document.getElementById('showBengaluruDemo').checked,
+    bounds: mapState.fallbackBounds
+  });
+  if (
+    mapState.fallbackMapSignature === signature
+    && (fallback.querySelector('iframe') || !document.getElementById('showBengaluruDemo').checked)
+  ) return;
+  if (!document.getElementById('showBengaluruDemo').checked) {
+    fallback.innerHTML = '<strong>Google Maps is not configured</strong><p>Enable the Bengaluru demo layer to view its simulated sample map.</p>';
+    mapState.fallbackMapSignature = signature;
+    return;
+  }
+  const deliveries = mapState.bengaluruDemo.deliveries;
+  const heatCells = mapState.bengaluruDemo.heat_cells;
+  const maxSamples = Math.max(1, ...heatCells.map(cell => cell.sample_count));
+  const northWest = `${mapState.fallbackBounds.west},${mapState.fallbackBounds.north}`;
+  const southEast = `${mapState.fallbackBounds.east},${mapState.fallbackBounds.south}`;
+  const params = new URLSearchParams({
+    bbox: `${mapState.fallbackBounds.west},${mapState.fallbackBounds.south},${mapState.fallbackBounds.east},${mapState.fallbackBounds.north}`,
+    layer: 'mapnik'
+  });
+  const heat = heatCells.map(cell => {
+    const point = fallbackMapPercent(mapPoint(cell));
+    const intensity = Math.sqrt(cell.sample_count / maxSamples);
+    const color = intensity >= 0.75 ? '#ef4444' : intensity >= 0.4 ? '#f59e0b' : '#38bdf8';
+    return `<circle cx="${point.x}" cy="${point.y}" r="${14 + intensity * 12}" fill="${color}" fill-opacity="${0.12 + intensity * 0.18}"><title>Simulated route heat · ${cell.sample_count} route samples</title></circle>`;
+  }).join('');
+  const routes = deliveries.map(item => {
+    const pickup = fallbackMapPercent(mapPoint(item.pickup));
+    const destination = fallbackMapPercent(mapPoint(item.destination));
+    return `<line x1="${pickup.x}" y1="${pickup.y}" x2="${destination.x}" y2="${destination.y}" stroke="${escapeHTML(item.color)}" stroke-width="4" stroke-opacity="0.9" stroke-linecap="round"><title>${escapeHTML(item.delivery_id)} · simulated planned route</title></line>`;
+  }).join('');
+  const endpoints = deliveries.map(item => {
+    const pickup = fallbackMapPercent(mapPoint(item.pickup));
+    const destination = fallbackMapPercent(mapPoint(item.destination));
+    return `
+      <g><circle cx="${pickup.x}" cy="${pickup.y}" r="9" fill="#0f172a" stroke="#f8fafc" stroke-width="3"/><text x="${pickup.x}" y="${pickup.y + 4}" text-anchor="middle" fill="#f8fafc" font-size="10" font-weight="700">P</text><title>${escapeHTML(item.delivery_id)} pickup · SIMULATED</title></g>
+      <g><path d="M ${destination.x} ${destination.y - 10} L ${destination.x + 9} ${destination.y} L ${destination.x} ${destination.y + 10} L ${destination.x - 9} ${destination.y} Z" fill="${escapeHTML(item.color)}" stroke="#0f172a" stroke-width="2"/><text x="${destination.x}" y="${destination.y + 4}" text-anchor="middle" fill="#0f172a" font-size="10" font-weight="700">D</text><title>${escapeHTML(item.delivery_id)} delivery destination · SIMULATED</title></g>
+    `;
+  }).join('');
+  const drones = deliveries.map((item, index) => {
+    const point = fallbackMapPercent(mapPoint(item.position));
+    return `<g><circle cx="${point.x}" cy="${point.y}" r="15" fill="${escapeHTML(item.color)}" stroke="#ffffff" stroke-width="3"/><text x="${point.x}" y="${point.y + 5}" text-anchor="middle" fill="#07111e" font-size="12" font-weight="800">${index + 1}</text><title>${escapeHTML(item.drone_id)} · ${escapeHTML(item.area)} · SIMULATED, not live GPS</title></g>`;
+  }).join('');
+  const visible = Number(mapState.fallbackBounds.north) > Number(mapState.fallbackBounds.south)
+    && Number(mapState.fallbackBounds.east) > Number(mapState.fallbackBounds.west);
+  if (!visible) return;
+  fallback.className = 'fallback-map fallback-map-bengaluru';
+  fallback.setAttribute('aria-label', 'OpenStreetMap of Bengaluru with simulated demo drone, pickup, delivery and heat locations.');
+  fallback.innerHTML = `
+    <iframe title="OpenStreetMap of Bengaluru" src="${BENGALURU_MAP_TILE_URL}?${params.toString()}" loading="lazy" referrerpolicy="no-referrer" tabindex="-1"></iframe>
+    <svg class="fallback-demo-overlay" viewBox="0 0 1000 600" preserveAspectRatio="none" role="img" aria-label="Simulated drone routes and delivery locations">${heat}${routes}${endpoints}${drones}</svg>
+    <span class="fallback-map-attribution">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a> · ${northWest} to ${southEast}</span>
+    <span class="fallback-map-legend"><span>Drone</span><span>Pickup</span><span>Drop-off</span><span>Heat</span></span>
+  `;
+  mapState.fallbackMapSignature = signature;
 }
 
 function upsertMarker(mapOfMarkers, key, options, onClick) {
@@ -286,7 +390,10 @@ function removeUnused(mapOfMarkers, keepKeys) {
 
 function renderMap() {
   ensureMap();
-  if (!mapState.map) return;
+  if (!mapState.map) {
+    renderFallbackBengaluruMap();
+    return;
+  }
   const visibleMarkerIds = new Set();
   const observedIds = new Set();
   const plannedIds = new Set();
@@ -357,7 +464,105 @@ function renderMap() {
   removeUnused(mapState.plannedLines, plannedIds);
   removeUnused(mapState.deliveryMarkers, deliveryMarkerIds);
   updateHeatmap();
+  updateBengaluruDemoOverlays();
   updateTwinOverlays();
+}
+
+function updateBengaluruDemoOverlays() {
+  if (!mapState.map) return;
+  const enabled = document.getElementById('showBengaluruDemo').checked;
+  const deliveries = enabled ? mapState.bengaluruDemo?.deliveries || [] : [];
+  const droneIds = new Set();
+  const routeIds = new Set();
+  const endpointIds = new Set();
+  const heatIds = new Set();
+  for (const [index, item] of deliveries.entries()) {
+    droneIds.add(item.drone_id);
+    const droneMarker = upsertMarker(mapState.demoMarkers, item.drone_id, {
+      map: mapState.map,
+      position: googlePosition(item.position),
+      title: `${item.drone_id} · ${item.area} · SIMULATED, not live GPS`,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 10,
+        fillColor: item.color,
+        fillOpacity: 1,
+        strokeColor: '#ffffff',
+        strokeWeight: 2
+      },
+      label: {text: String(index + 1), color: '#07111e', fontWeight: 'bold'},
+      zIndex: 15
+    });
+    droneMarker.setMap(mapState.map);
+
+    routeIds.add(item.delivery_id);
+    const route = upsertMarker(mapState.demoRoutes, item.delivery_id, {
+      map: mapState.map,
+      path: [googlePosition(item.pickup), googlePosition(item.destination)],
+      geodesic: true,
+      strokeColor: item.color,
+      strokeOpacity: 0.85,
+      strokeWeight: 4,
+      icons: [{icon: {path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW}, offset: '75%'}]
+    });
+    route.setMap(mapState.map);
+
+    for (const [kind, point, label, color] of [
+      ['pickup', item.pickup, 'P', '#f8fafc'],
+      ['destination', item.destination, 'D', item.color]
+    ]) {
+      const key = `${item.delivery_id}:${kind}`;
+      endpointIds.add(key);
+      const marker = upsertMarker(mapState.demoDeliveryMarkers, key, {
+        map: mapState.map,
+        position: googlePosition(point),
+        title: `${item.delivery_id} · ${kind} · ${item.area} · SIMULATED`,
+        icon: {
+          path: kind === 'pickup' ? google.maps.SymbolPath.CIRCLE : google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+          scale: kind === 'pickup' ? 7 : 8,
+          fillColor: color,
+          fillOpacity: 1,
+          strokeColor: '#0f172a',
+          strokeWeight: 2
+        },
+        label: {text: label, color: kind === 'pickup' ? '#0f172a' : '#ffffff', fontWeight: 'bold'}
+      });
+      marker.setMap(mapState.map);
+    }
+  }
+  removeUnused(mapState.demoMarkers, droneIds);
+  removeUnused(mapState.demoRoutes, routeIds);
+  removeUnused(mapState.demoDeliveryMarkers, endpointIds);
+
+  const cells = enabled ? mapState.bengaluruDemo?.heat_cells || [] : [];
+  const maxSamples = Math.max(1, ...cells.map(cell => cell.sample_count));
+  const halfCell = (mapState.bengaluruDemo?.heat_cell_size_deg || 0.005) / 2;
+  for (const cell of cells) {
+    const key = `${cell.latitude}:${cell.longitude}`;
+    heatIds.add(key);
+    const intensity = Math.sqrt(cell.sample_count / maxSamples);
+    const color = intensity >= 0.75 ? '#ef4444' : intensity >= 0.4 ? '#f59e0b' : '#38bdf8';
+    const options = {
+      bounds: {
+        north: cell.latitude + halfCell,
+        south: cell.latitude - halfCell,
+        east: cell.longitude + halfCell,
+        west: cell.longitude - halfCell
+      },
+      fillColor: color,
+      fillOpacity: 0.12 + 0.24 * intensity,
+      strokeColor: color,
+      strokeOpacity: 0.4,
+      strokeWeight: 1,
+      map: mapState.map,
+      zIndex: 2
+    };
+    const rectangle = mapState.demoHeatCells.get(key);
+    if (!rectangle) mapState.demoHeatCells.set(key, new google.maps.Rectangle(options));
+    else rectangle.setOptions(options);
+  }
+  removeUnused(mapState.demoHeatCells, heatIds);
+  for (const rectangle of mapState.demoHeatCells.values()) rectangle.setMap(mapState.map);
 }
 
 function updateHeatmap() {
@@ -457,7 +662,26 @@ function updateTwinOverlays() {
 }
 
 function fitVisibleMap() {
-  if (!mapState.map) return;
+  if (!mapState.map) {
+    const points = document.getElementById('showBengaluruDemo').checked
+      ? (mapState.bengaluruDemo?.deliveries || []).flatMap(item => [
+        mapPoint(item.position), mapPoint(item.pickup), mapPoint(item.destination)
+      ])
+      : [];
+    if (!points.length) return;
+    const latitudes = points.map(point => point.latitude);
+    const longitudes = points.map(point => point.longitude);
+    const latPadding = Math.max(0.005, (Math.max(...latitudes) - Math.min(...latitudes)) * 0.14);
+    const lngPadding = Math.max(0.005, (Math.max(...longitudes) - Math.min(...longitudes)) * 0.14);
+    mapState.fallbackBounds = {
+      south: Math.min(...latitudes) - latPadding,
+      west: Math.min(...longitudes) - lngPadding,
+      north: Math.max(...latitudes) + latPadding,
+      east: Math.max(...longitudes) + lngPadding
+    };
+    renderFallbackBengaluruMap();
+    return;
+  }
   const bounds = new google.maps.LatLngBounds();
   let points = 0;
   const add = point => {
@@ -482,10 +706,32 @@ function fitVisibleMap() {
     mapState.twin.zones.forEach(item => add(item.center));
     mapState.twin.scenarios.forEach(scenario => scenario.routes.forEach(route => route.path.forEach(add)));
   }
+  if (document.getElementById('showBengaluruDemo').checked) {
+    for (const item of mapState.bengaluruDemo?.deliveries || []) {
+      add(item.position);
+      add(item.pickup);
+      add(item.destination);
+    }
+  }
   if (points) {
     mapState.map.fitBounds(bounds);
     if (points === 1) mapState.map.setZoom(15);
   }
+}
+
+function zoomFallbackMap(factor) {
+  const bounds = mapState.fallbackBounds;
+  const centerLatitude = (bounds.south + bounds.north) / 2;
+  const centerLongitude = (bounds.west + bounds.east) / 2;
+  const halfLatitudeSpan = Math.max(0.003, (bounds.north - bounds.south) / (2 * factor));
+  const halfLongitudeSpan = Math.max(0.003, (bounds.east - bounds.west) / (2 * factor));
+  mapState.fallbackBounds = {
+    south: centerLatitude - halfLatitudeSpan,
+    west: centerLongitude - halfLongitudeSpan,
+    north: centerLatitude + halfLatitudeSpan,
+    east: centerLongitude + halfLongitudeSpan
+  };
+  renderFallbackBengaluruMap();
 }
 
 async function pollDashboard() {
@@ -553,6 +799,29 @@ async function bootDashboard() {
     setMapState('error', 'Configuration unavailable', `Could not load /api/config: ${detail} Fleet data will still be requested.`);
     mapElement.innerHTML = '<div class="fallback-map"><strong>Map configuration unavailable</strong><p>Fleet telemetry continues independently.</p></div>';
   }
+  try {
+    const demo = await getJSON('/api/demo/bengaluru');
+    if (
+      demo?.city !== 'Bengaluru'
+      || demo.origin !== 'SIMULATED'
+      || !Array.isArray(demo.drones)
+      || demo.drones.length !== 5
+      || !Array.isArray(demo.deliveries)
+      || demo.deliveries.length !== 5
+      || !Array.isArray(demo.heat_cells)
+    ) {
+      throw new Error('Bengaluru sample response is invalid.');
+    }
+    mapState.bengaluruDemo = demo;
+    renderBengaluruDemoList();
+    if (!mapState.mapReady && !mapState.mapError) {
+      setMapState('warning', mapStatus.textContent, 'OpenStreetMap fallback shows five simulated Bengaluru drones, sample delivery locations and a demo-only route heatmap. This is not live GPS.');
+    }
+    renderMap();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'request failed';
+    document.getElementById('bengaluruDemoList').textContent = `Bengaluru sample unavailable: ${detail}`;
+  }
   pollDashboard();
   try {
     const twin = await getJSON('/api/twin');
@@ -579,7 +848,8 @@ function loadGoogleMaps(apiKey) {
   window.gm_authFailure = () => {
     mapState.mapError = true;
     setMapState('error', 'Google Maps key rejected', 'Check key billing, HTTP referrer restrictions, and the Maps JavaScript API restriction.');
-    mapElement.innerHTML = '<div class="fallback-map"><strong>Google Maps rejected the key</strong><p>Backend telemetry remains available.</p></div>';
+    mapElement.innerHTML = '<div class="fallback-map"><strong>Google Maps rejected the key</strong><p>Backend telemetry remains available. The Bengaluru sample is also available on the OpenStreetMap fallback.</p></div>';
+    renderFallbackBengaluruMap();
   };
   const script = document.createElement('script');
   script.id = 'googleMapsScript';
@@ -589,6 +859,8 @@ function loadGoogleMaps(apiKey) {
   script.onerror = () => {
     mapState.mapError = true;
     setMapState('error', 'Google Maps network/API error', 'The Maps script failed to load. Check network access, billing, API restrictions and the browser console.');
+    mapElement.innerHTML = '<div class="fallback-map"><strong>Google Maps network/API error</strong><p>The Bengaluru sample is available on the OpenStreetMap fallback.</p></div>';
+    renderFallbackBengaluruMap();
   };
   document.head.appendChild(script);
 }
@@ -599,7 +871,10 @@ const workbench = {
   scenario: null,
   replay: null,
   replayIndex: 0,
-  replayTimer: null
+  replayTimer: null,
+  agile: null,
+  agileSprintFilter: 'all',
+  agileLoading: false
 };
 
 function csrfToken() {
@@ -675,17 +950,28 @@ function setAuthState(user) {
   document.getElementById('scenarioForm').querySelector('button[type="submit"]').disabled = !canPlan;
   document.getElementById('replayForm').querySelector('button[type="submit"]').disabled = !user;
   document.getElementById('refreshScenarios').disabled = !user;
+  const canEditAgile = ['ADMIN', 'OPERATOR'].includes(user?.role);
+  document.getElementById('agileTaskForm').hidden = !canEditAgile;
+  document.getElementById('agileSprintForm').hidden = !canEditAgile;
+  document.getElementById('agileSignInLink').hidden = Boolean(user);
   setWorkbenchMessage('authMessage', user
     ? `Signed in as ${user.username}. Role permissions are enforced by the server.`
     : 'Sign in to access administration, planning, scenarios and replay.', user ? 'success' : '');
   if (user?.role === 'ADMIN') refreshUsers();
   if (user) {
     refreshScenarioHistory();
+    refreshAgileBoard();
     setWorkbenchMessage('optimizerMessage', `Signed in as ${user.role}; request a deterministic plan.`, '');
     setWorkbenchMessage('scenarioMessage', `Signed in as ${user.role}; scenarios are isolated and labelled SIMULATED.`, '');
     setWorkbenchMessage('replayMessage', 'Select a drone and bounded time range to view accepted persisted GPS.', '');
   } else {
     document.getElementById('userList').replaceChildren();
+    workbench.agile = null;
+    workbench.agileSprintFilter = 'all';
+    document.getElementById('agileColumns').replaceChildren();
+    document.getElementById('agileSummary').replaceChildren();
+    document.getElementById('agileMessage').className = 'status-block';
+    document.getElementById('agileMessage').textContent = 'Sign in to view the team board.';
   }
 }
 
@@ -700,6 +986,159 @@ async function refreshSession() {
 
 function showError(id, error) {
   setWorkbenchMessage(id, error instanceof Error ? error.message : 'The request failed.', 'error');
+}
+
+const AGILE_STATUSES = ['TODO', 'IN_PROGRESS', 'REVIEW', 'DONE'];
+const AGILE_PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
+
+function agileSprintOptions(selectedId = '') {
+  const sprints = workbench.agile?.sprints || [];
+  return `<option value="">Backlog</option>${sprints.map(sprint => `
+    <option value="${escapeHTML(sprint.sprint_id)}" ${sprint.sprint_id === selectedId ? 'selected' : ''}>${escapeHTML(sprint.name)} · ${escapeHTML(sprint.state)}</option>
+  `).join('')}`;
+}
+
+function agileAssigneeOptions(selectedId = '') {
+  const users = workbench.agile?.users || [];
+  return `<option value="">Unassigned</option>${users.map(user => `
+    <option value="${escapeHTML(user.user_id)}" ${user.user_id === selectedId ? 'selected' : ''}>${escapeHTML(user.username)}</option>
+  `).join('')}`;
+}
+
+function renderAgileBoard(payload) {
+  if (!payload || !Array.isArray(payload.tasks) || !Array.isArray(payload.sprints) || !Array.isArray(payload.users)) {
+    throw new Error('Agile board response is invalid.');
+  }
+  workbench.agile = payload;
+  const filter = document.getElementById('agileSprintFilter');
+  const previousFilter = workbench.agileSprintFilter || filter.value || 'all';
+  const filterOptions = [
+    '<option value="all">All work</option>',
+    '<option value="backlog">Backlog</option>',
+    ...payload.sprints.map(sprint => `<option value="${escapeHTML(sprint.sprint_id)}">${escapeHTML(sprint.name)} · ${escapeHTML(sprint.state)}</option>`)
+  ];
+  filter.innerHTML = filterOptions.join('');
+  workbench.agileSprintFilter = [...filter.options].some(option => option.value === previousFilter)
+    ? previousFilter
+    : payload.sprints.find(sprint => sprint.state === 'ACTIVE')?.sprint_id || 'all';
+  filter.value = workbench.agileSprintFilter;
+
+  for (const formId of ['agileTaskForm']) {
+    const form = document.getElementById(formId);
+    const selectedSprint = form.elements.sprint_id.value;
+    form.elements.sprint_id.innerHTML = agileSprintOptions(selectedSprint);
+    form.elements.assignee_id.innerHTML = agileAssigneeOptions(form.elements.assignee_id.value);
+  }
+
+  const visibleTasks = payload.tasks.filter(task => {
+    if (workbench.agileSprintFilter === 'all') return true;
+    if (workbench.agileSprintFilter === 'backlog') return !task.sprint_id;
+    return task.sprint_id === workbench.agileSprintFilter;
+  });
+  const activeSprint = payload.sprints.find(sprint => sprint.state === 'ACTIVE');
+  const points = visibleTasks.reduce((total, task) => total + (task.story_points || 0), 0);
+  document.getElementById('agileSummary').innerHTML = `
+    <div><strong>${visibleTasks.length}</strong><span>Work items</span></div>
+    <div><strong>${points}</strong><span>Story points</span></div>
+    <div><strong>${escapeHTML(activeSprint?.name || 'No active sprint')}</strong><span>Current sprint</span></div>
+    <div><strong>${payload.sprints.length}</strong><span>Sprints</span></div>
+  `;
+  const selectedSprint = payload.sprints.find(sprint => sprint.sprint_id === workbench.agileSprintFilter);
+  const sprintManage = document.getElementById('agileSprintManage');
+  sprintManage.hidden = !selectedSprint || !['ADMIN', 'OPERATOR'].includes(workbench.user?.role);
+  if (selectedSprint) {
+    document.getElementById('agileSprintName').textContent = `${selectedSprint.name} · ${selectedSprint.state}`;
+    const dateRange = [selectedSprint.starts_on, selectedSprint.ends_on].filter(Boolean).join(' – ');
+    document.getElementById('agileSprintInfo').textContent = [selectedSprint.goal, dateRange].filter(Boolean).join(' · ');
+    document.getElementById('startAgileSprint').hidden = selectedSprint.state !== 'PLANNED';
+    document.getElementById('completeAgileSprint').hidden = selectedSprint.state !== 'ACTIVE';
+  }
+
+  const columns = [
+    {status: 'TODO', label: 'To do'},
+    {status: 'IN_PROGRESS', label: 'In progress'},
+    {status: 'REVIEW', label: 'Review'},
+    {status: 'DONE', label: 'Done'}
+  ];
+  document.getElementById('agileColumns').innerHTML = columns.map(column => {
+    const tasks = visibleTasks.filter(task => task.status === column.status);
+    return `
+      <section class="agile-column" aria-labelledby="agile-${column.status}">
+        <div class="agile-column-heading"><h3 id="agile-${column.status}">${column.label}</h3><span class="pill neutral">${tasks.length}</span></div>
+        <div class="agile-task-list">${tasks.map(renderAgileTask).join('') || '<p class="agile-empty">No work items</p>'}</div>
+      </section>
+    `;
+  }).join('');
+  const editable = ['ADMIN', 'OPERATOR'].includes(workbench.user?.role);
+  document.querySelectorAll('.agile-task-status, .agile-task-edit input, .agile-task-edit textarea, .agile-task-edit select')
+    .forEach(control => { control.disabled = !editable; });
+  document.querySelectorAll('.agile-task-edit button[type="submit"]').forEach(button => { button.hidden = !editable; });
+  document.querySelectorAll('[data-delete-agile-task]').forEach(button => {
+    button.hidden = workbench.user?.role !== 'ADMIN';
+  });
+}
+
+function renderAgileTask(task) {
+  const editKey = escapeHTML(task.task_id);
+  return `
+    <article class="agile-task" data-task-id="${editKey}">
+      <div class="agile-task-heading">
+        <span class="status-tag agile-priority agile-priority-${escapeHTML(task.priority.toLowerCase())}">${escapeHTML(task.priority)}</span>
+        ${task.story_points == null ? '' : `<span class="pill neutral">${escapeHTML(task.story_points)} pts</span>`}
+      </div>
+      <h4>${escapeHTML(task.title)}</h4>
+      <p class="agile-task-description">${escapeHTML(task.description || 'No description provided.')}</p>
+      <div class="agile-task-meta">
+        <span>${escapeHTML(task.assignee || 'Unassigned')}</span>
+        <span>${escapeHTML(task.sprint_name || 'Backlog')}</span>
+      </div>
+      <label class="agile-status-control">Move to
+        <select class="agile-task-status" aria-label="Move ${escapeHTML(task.title)} to another status" data-task-id="${editKey}">
+          ${AGILE_STATUSES.map(status => `<option value="${status}" ${status === task.status ? 'selected' : ''}>${status.replace('_', ' ')}</option>`).join('')}
+        </select>
+      </label>
+      <details class="agile-edit-details">
+        <summary>Edit work item</summary>
+        <form class="agile-task-edit" data-task-id="${editKey}">
+          <label>Title <input name="title" required maxlength="160" value="${escapeHTML(task.title)}"></label>
+          <label>Description <textarea name="description" maxlength="2000" rows="3">${escapeHTML(task.description)}</textarea></label>
+          <label>Status <select name="status">${AGILE_STATUSES.map(status => `<option value="${status}" ${status === task.status ? 'selected' : ''}>${status.replace('_', ' ')}</option>`).join('')}</select></label>
+          <label>Priority <select name="priority">${AGILE_PRIORITIES.map(priority => `<option value="${priority}" ${priority === task.priority ? 'selected' : ''}>${priority}</option>`).join('')}</select></label>
+          <label>Story points <input name="story_points" type="number" min="1" max="100" step="1" value="${task.story_points ?? ''}"></label>
+          <label>Assignee <select name="assignee_id">${agileAssigneeOptions(task.assignee_id || '')}</select></label>
+          <label>Sprint <select name="sprint_id">${agileSprintOptions(task.sprint_id || '')}</select></label>
+          <button class="button secondary" type="submit">Save changes</button>
+          <button class="button secondary" type="button" data-delete-agile-task="${editKey}">Delete</button>
+        </form>
+      </details>
+    </article>
+  `;
+}
+
+async function refreshAgileBoard() {
+  if (!workbench.user || workbench.agileLoading) return;
+  workbench.agileLoading = true;
+  setWorkbenchMessage('agileMessage', 'Loading saved Agile work items…');
+  try {
+    const payload = await apiRequest('/api/agile');
+    renderAgileBoard(payload);
+    const taskCount = payload.tasks.length;
+    setWorkbenchMessage('agileMessage', `${taskCount} saved work item${taskCount === 1 ? '' : 's'} · Changes are shared with signed-in team members.`, 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  } finally {
+    workbench.agileLoading = false;
+  }
+}
+
+function agileTaskPayload(form) {
+  const values = Object.fromEntries(new FormData(form));
+  return {
+    ...values,
+    story_points: values.story_points ? Number(values.story_points) : null,
+    assignee_id: values.assignee_id || null,
+    sprint_id: values.sprint_id || null
+  };
 }
 
 function renderUsers(users) {
@@ -1101,6 +1540,98 @@ document.getElementById('replayBack').addEventListener('click', () => stepReplay
 document.getElementById('replayForward').addEventListener('click', () => stepReplay(1));
 document.getElementById('replayReport').addEventListener('click', downloadReplayReport);
 
+document.getElementById('refreshAgileBoard').addEventListener('click', refreshAgileBoard);
+async function transitionAgileSprint(action) {
+  const sprintId = workbench.agileSprintFilter;
+  if (!sprintId || sprintId === 'all' || sprintId === 'backlog') return;
+  try {
+    await apiRequest(`/api/agile/sprints/${encodeURIComponent(sprintId)}`, 'PUT', {action});
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', `Sprint ${action === 'start' ? 'started' : 'completed'}.`, 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  }
+}
+document.getElementById('startAgileSprint').addEventListener('click', () => transitionAgileSprint('start'));
+document.getElementById('completeAgileSprint').addEventListener('click', () => transitionAgileSprint('complete'));
+document.getElementById('agileSprintFilter').addEventListener('change', event => {
+  workbench.agileSprintFilter = event.target.value;
+  if (workbench.agile) renderAgileBoard(workbench.agile);
+});
+document.getElementById('agileTaskForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    await apiRequest('/api/agile/tasks', 'POST', agileTaskPayload(form));
+    form.reset();
+    form.elements.priority.value = 'NORMAL';
+    const sprintId = workbench.agileSprintFilter !== 'all' && workbench.agileSprintFilter !== 'backlog'
+      ? workbench.agileSprintFilter
+      : '';
+    form.elements.sprint_id.value = sprintId;
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', 'Work item created.', 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  }
+});
+document.getElementById('agileSprintForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form));
+  try {
+    const result = await apiRequest('/api/agile/sprints', 'POST', values);
+    form.reset();
+    workbench.agileSprintFilter = result.sprint_id;
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', `Sprint created and ${result.state.toLowerCase()}.`, 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  }
+});
+document.getElementById('agileColumns').addEventListener('change', async event => {
+  if (!event.target.matches('.agile-task-status')) return;
+  const select = event.target;
+  const form = select.closest('.agile-task').querySelector('.agile-task-edit');
+  const payload = agileTaskPayload(form);
+  payload.status = select.value;
+  select.disabled = true;
+  try {
+    await apiRequest(`/api/agile/tasks/${encodeURIComponent(select.dataset.taskId)}`, 'PUT', payload);
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', 'Work item moved.', 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  } finally {
+    select.disabled = false;
+  }
+});
+document.getElementById('agileColumns').addEventListener('submit', async event => {
+  if (!event.target.matches('.agile-task-edit')) return;
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await apiRequest(`/api/agile/tasks/${encodeURIComponent(form.dataset.taskId)}`, 'PUT', agileTaskPayload(form));
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', 'Work item updated.', 'success');
+  } catch (error) {
+    showError('agileMessage', error);
+  }
+});
+document.getElementById('agileColumns').addEventListener('click', async event => {
+  const button = event.target.closest('[data-delete-agile-task]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/agile/tasks/${encodeURIComponent(button.dataset.deleteAgileTask)}`, 'DELETE');
+    await refreshAgileBoard();
+    setWorkbenchMessage('agileMessage', 'Work item deleted.', 'success');
+  } catch (error) {
+    button.disabled = false;
+    showError('agileMessage', error);
+  }
+});
+
 const defaultReplayTo = new Date();
 const defaultReplayFrom = new Date(defaultReplayTo.getTime() - 24 * 60 * 60 * 1000);
 document.getElementById('replayTo').value = new Date(defaultReplayTo.getTime() - defaultReplayTo.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -1123,9 +1654,15 @@ for (const id of ['trafficWindow', 'trafficDrone', 'trafficSource', 'trafficCell
 document.getElementById('trafficMission').addEventListener('change', refreshNow);
 document.getElementById('zoomIn').addEventListener('click', () => {
   if (mapState.map) mapState.map.setZoom(mapState.map.getZoom() + 1);
+  else zoomFallbackMap(1.5);
 });
 document.getElementById('zoomOut').addEventListener('click', () => {
   if (mapState.map) mapState.map.setZoom(mapState.map.getZoom() - 1);
+  else zoomFallbackMap(1 / 1.5);
 });
 document.getElementById('fitMap').addEventListener('click', fitVisibleMap);
+document.getElementById('showBengaluruDemo').addEventListener('change', () => {
+  renderBengaluruDemoList();
+  renderMap();
+});
 window.addEventListener('load', bootDashboard, { once: true });

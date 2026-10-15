@@ -32,6 +32,9 @@ class ServiceTests(unittest.TestCase):
     def test_identity(self):
         self.assertEqual(json.loads(self.get('/'))['project'], 'StormPilot')
 
+    def test_favicon_is_served_without_a_missing_resource(self):
+        self.assertIn('<svg', self.get('/favicon.ico'))
+
     def test_dispatch(self):
         self.assertEqual(json.loads(self.get('/dispatch'))['status'], 'dispatched')
 

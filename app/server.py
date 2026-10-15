@@ -21,6 +21,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
+        if path == '/favicon.ico':
+            self._serve_static('/static/favicon.svg')
+            return
         if path.startswith('/api/'):
             request_headers = dict(self.headers.items())
             request_headers['X-Client-IP'] = self.client_address[0]
@@ -34,8 +37,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         status = 200
         content_type = 'application/json'
-        if path in ('/healthz', '/readyz'):
+        if path == '/healthz':
             body = {'status': 'ok'}
+        elif path == '/readyz':
+            status, body = api.readiness_status()
         elif path == '/':
             body = {'project': 'StormPilot', 'mission': 'Drone delivery operations',
                     'instance': os.getenv('HOSTNAME', 'local'),
@@ -50,14 +55,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = 'text/plain; version=0.0.4'
             with LOCK:
                 snapshot = list(COUNTS.items())
-            lines = ['# HELP stormpilot_requests_total Business HTTP requests.',
-                     '# TYPE stormpilot_requests_total counter']
-            for (route, code), count in sorted(snapshot):
-                lines.append(f'stormpilot_requests_total{{route="{route}",status="{code}"}} {count}')
-            lines += ['# HELP stormpilot_uptime_seconds Process uptime.',
-                      '# TYPE stormpilot_uptime_seconds gauge',
-                      f'stormpilot_uptime_seconds {time.monotonic() - START:.3f}']
-            body = '\n'.join(lines) + '\n'
+            body = api.prometheus_metrics(snapshot, time.monotonic() - START)
         else:
             status = 404
             body = {'error': 'not found'}
@@ -147,7 +145,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def log_message(self, fmt, *args):
-        print(json.dumps({'event': 'http', 'message': fmt % args}), flush=True)
+        status = str(args[1]) if len(args) > 1 else ''
+        print(json.dumps({
+            'event': 'http',
+            'method': getattr(self, 'command', ''),
+            'path': urlparse(getattr(self, 'path', '')).path,
+            'status': status,
+        }), flush=True)
 
 
 if __name__ == '__main__':

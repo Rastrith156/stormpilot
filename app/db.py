@@ -282,6 +282,52 @@ def initialize_storage(force_reset=False):
                 );
                 CREATE INDEX IF NOT EXISTS idx_simulation_runs_created ON simulation_runs(created_at);
                 '''
+            ),
+            (
+                5,
+                '005_agile_planning',
+                '''
+                CREATE TABLE IF NOT EXISTS agile_sprints (
+                    sprint_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    goal TEXT NOT NULL DEFAULT '',
+                    starts_on TEXT,
+                    ends_on TEXT,
+                    state TEXT NOT NULL DEFAULT 'PLANNED' CHECK (state IN ('ACTIVE', 'PLANNED', 'COMPLETED')),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(created_by) REFERENCES admin_users(user_id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agile_one_active_sprint
+                    ON agile_sprints(state) WHERE state = 'ACTIVE';
+                CREATE INDEX IF NOT EXISTS idx_agile_sprints_dates
+                    ON agile_sprints(starts_on, ends_on);
+
+                CREATE TABLE IF NOT EXISTS agile_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'TODO'
+                        CHECK (status IN ('TODO', 'IN_PROGRESS', 'REVIEW', 'DONE')),
+                    priority TEXT NOT NULL DEFAULT 'NORMAL'
+                        CHECK (priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')),
+                    story_points INTEGER CHECK (story_points IS NULL OR story_points BETWEEN 1 AND 100),
+                    assignee_id TEXT,
+                    sprint_id TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(assignee_id) REFERENCES admin_users(user_id),
+                    FOREIGN KEY(sprint_id) REFERENCES agile_sprints(sprint_id),
+                    FOREIGN KEY(created_by) REFERENCES admin_users(user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_agile_tasks_sprint_status
+                    ON agile_tasks(sprint_id, status);
+                CREATE INDEX IF NOT EXISTS idx_agile_tasks_assignee
+                    ON agile_tasks(assignee_id);
+                '''
             )
         ]
 
