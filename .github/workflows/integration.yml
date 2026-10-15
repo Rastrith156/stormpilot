@@ -52,7 +52,20 @@ jobs:
           export OAUTH_COOKIE_SECRET_FILE="$secret_dir/cookie"
           docker compose -f compose.yaml -f compose.production.yaml --profile production run --rm --no-deps gateway \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - run: docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120
+      - name: Start Compose integration stack
+        run: |
+          if docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120; then
+            exit 0
+          else
+            status=$?
+            docker compose -f compose.yaml -f compose.dev.yaml ps --all
+            diagnostics="$(docker compose -f compose.yaml -f compose.dev.yaml logs --no-color --tail=30 2>&1)"
+            diagnostics="${diagnostics//'%'/'%25'}"
+            diagnostics="${diagnostics//$'\r'/'%0D'}"
+            diagnostics="${diagnostics//$'\n'/'%0A'}"
+            echo "::error title=Compose startup diagnostics::$diagnostics"
+            exit "$status"
+          fi
       - run: python scripts/smoke.py
       - name: Validate Prometheus configuration and alert rules
         run: docker compose -f compose.yaml -f compose.dev.yaml exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
