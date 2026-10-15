@@ -3,7 +3,7 @@
 ## Automated tests
 
 - Baseline before Milestone 5: 56 Python tests passed.
-- Current full suite: **79 Python tests passed** with `python -m unittest discover -s tests -v`. No existing test was weakened or removed.
+- Current full suite: **89 Python tests passed** with `python -m unittest discover -s tests -v`. No existing test was weakened or removed.
 - New module `tests/test_milestone5.py` (23 tests), all against isolated temporary databases and synthetic credentials:
   - **Authentication**: bootstrap CLI (`--password-stdin`) creates exactly one administrator and refuses a second; server-side role matrix for `ADMIN`/`OPERATOR`/`VIEWER` plus 401 for anonymous mutations; password rotation revokes sessions and requires the new password; login throttling, CSRF, session expiry and legacy shared-token bypass are covered here and in the Milestone 4 tests; secrets (login password, session cookie, device bearer token, SMTP/Redmine sentinel values) never appear in HTTP logs, API responses, `/metrics` or frontend bundles.
   - **Phone GPS and delivery**: admin-authorized enrollment, unique device-to-drone association (409 on conflict), revoke, rejected telemetry, then recovery/re-enrollment; invalid, duplicate, out-of-order, implausible-speed, stale and future telemetry rejection with persisted rejection reasons; per-device 429 rate limit; `OFFLINE` to `PHONE_GPS` to `STALE` transitions; distance accumulation that ignores rejected samples and GPS jumps; geofence arrival evidence; idempotent handover completion with exactly one queued receipt; the phone page exposes permission, last-fix, accuracy, connection and delivery status and embeds no coordinates.
@@ -18,6 +18,7 @@
 - `node --check app/static/app.js`: **PASS**.
 - `python scripts/check_inline_js.py`: **PASS** (inline script of `/drone/connect`).
 - `git diff --check`: **PASS** (only LF/CRLF conversion notices, no whitespace errors).
+- Production gateway tests verify public Caddy TLS (not an internal CA), same-origin phone geolocation, map CSP allowances, and writable non-root database storage in Compose and the Kubernetes smoke manifest.
 - Docker Compose configuration validated without starting anything, using a temporary placeholder env file outside the repository:
   - `docker compose -f compose.yaml config --quiet` exits 0.
   - `docker compose -f compose.yaml -f compose.dev.yaml config --quiet` exits 0.
@@ -31,7 +32,8 @@
 - **Real-phone GPS — PENDING.** No physical phone submitted GPS during validation. Enrollment, telemetry validation, arrival and revocation are covered by automated API tests; the phone page status markers are asserted statically. On-device permission prompts and true satellite fixes were not exercised.
 - **Live SMTP/Gmail delivery — PENDING.** No Gmail App Password was available. Local test mode and all failure/retry paths were verified with SMTP mocked; a real send was never attempted (automated tests must not send email by design).
 - **Browser automation of login, logout, planning, simulation and replay — PENDING.** The in-app browser-control setup failed before opening the local app, and neither Playwright nor Selenium is installed in the repository; no large new dependency was added. These flows were exercised through the HTTP API and static page checks instead.
-- **Docker/Kubernetes deployment — configuration only.** Images were not built or deployed; the compose manifests and `k8s/` manifests were not applied.
+- **Public-domain deployment — PENDING.** Caddy is configured for automatic public certificates and allows the same-origin phone-GPS permission and external map assets, but DNS, firewall ports 80/443, OIDC callback/login and phone GPS must be verified on the actual host/domain. See [the deployment checklist](docs/DOMAIN_DEPLOYMENT.md).
+- **Container/Kubernetes deployment — PENDING.** The GitHub verify job built and scanned the container, but the prior Compose startup and Kubernetes smoke jobs did not complete successfully. Docker is unavailable locally, so the real containers and revised Kubernetes smoke manifest were not run here. The Kubernetes manifest is explicitly single-replica and ephemeral; use the persistent Docker Compose deployment for a domain.
 
 ## Database and backup status
 

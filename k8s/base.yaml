@@ -11,13 +11,12 @@ metadata:
   name: stormpilot
   namespace: stormpilot-lab
 spec:
-  replicas: 2
+  replicas: 1
   revisionHistoryLimit: 3
   selector:
     matchLabels: {app: stormpilot}
   strategy:
-    type: RollingUpdate
-    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+    type: Recreate
   template:
     metadata:
       labels: {app: stormpilot}
@@ -26,12 +25,15 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        fsGroup: 10001
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: api
           image: stormpilot:local
           imagePullPolicy: IfNotPresent
           env:
+            - name: APP_DATA_DIR
+              value: /data
             - name: REDMINE_URL
               value: ""
             - name: REDMINE_API_KEY
@@ -46,6 +48,8 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
           resources:
             requests: {cpu: 100m, memory: 64Mi}
             limits: {cpu: 500m, memory: 128Mi}
@@ -59,6 +63,9 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -76,6 +83,6 @@ metadata:
   name: stormpilot
   namespace: stormpilot-lab
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels: {app: stormpilot}

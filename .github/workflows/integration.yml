@@ -33,6 +33,25 @@ jobs:
           export OIDC_CLIENT_SECRET_FILE="$secret_dir/oidc"
           export OAUTH_COOKIE_SECRET_FILE="$secret_dir/cookie"
           docker compose -f compose.yaml -f compose.production.yaml --profile production config --quiet
+      - name: Validate public HTTPS gateway configuration
+        env:
+          APP_HOSTNAME: stormpilot.example.com
+          OIDC_ISSUER_URL: https://identity.example.com
+          OIDC_CLIENT_ID: stormpilot-ci
+          OIDC_ALLOWED_EMAIL_DOMAIN: example.com
+          REDMINE_URL: https://redmine.example.com
+        run: |
+          set -euo pipefail
+          secret_dir=$(mktemp -d)
+          trap 'rm -rf "$secret_dir"' EXIT
+          printf 'ci-placeholder' > "$secret_dir/redmine"
+          printf 'ci-placeholder' > "$secret_dir/oidc"
+          head -c 32 /dev/urandom > "$secret_dir/cookie"
+          export REDMINE_API_KEY_FILE="$secret_dir/redmine"
+          export OIDC_CLIENT_SECRET_FILE="$secret_dir/oidc"
+          export OAUTH_COOKIE_SECRET_FILE="$secret_dir/cookie"
+          docker compose -f compose.yaml -f compose.production.yaml --profile production run --rm --no-deps gateway \
+            validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120
       - run: python scripts/smoke.py
       - name: Validate Prometheus configuration and alert rules

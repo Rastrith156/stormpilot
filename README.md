@@ -38,6 +38,10 @@ docker compose exec api python -m app.admin bootstrap --username opsadmin
 
 Do not expose the app to a public network until HTTPS, the proxy boundary and authentication configuration have been reviewed.
 
+## Deploying to a public domain
+
+The supported single-server deployment uses Docker Compose with the production overlay and Caddy. Follow [the domain deployment checklist](docs/DOMAIN_DEPLOYMENT.md) for DNS, HTTPS, OIDC, secrets, first-admin setup, backups and post-deploy checks. The public-domain and phone-GPS flows have not been verified against your actual host, DNS provider or identity provider; finish that checklist before treating the site as production-ready.
+
 ## Authentication and migration
 
 - Passwords use salted PBKDF2-HMAC-SHA256 hashes; opaque session identifiers are hashed at rest. Sessions are HTTP-only, SameSite Strict, expire after eight hours, and are revocable. Cookie-authenticated state changes require a CSRF cookie/header pair.
