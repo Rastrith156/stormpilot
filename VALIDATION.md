@@ -3,7 +3,7 @@
 ## Automated tests
 
 - Baseline before Milestone 5: 56 Python tests passed.
-- Current full suite: **89 Python tests passed** with `python -m unittest discover -s tests -v`. No existing test was weakened or removed.
+- Current full suite: **90 Python tests passed** with `python -m unittest discover -s tests -v`. No existing test was weakened or removed.
 - New module `tests/test_milestone5.py` (23 tests), all against isolated temporary databases and synthetic credentials:
   - **Authentication**: bootstrap CLI (`--password-stdin`) creates exactly one administrator and refuses a second; server-side role matrix for `ADMIN`/`OPERATOR`/`VIEWER` plus 401 for anonymous mutations; password rotation revokes sessions and requires the new password; login throttling, CSRF, session expiry and legacy shared-token bypass are covered here and in the Milestone 4 tests; secrets (login password, session cookie, device bearer token, SMTP/Redmine sentinel values) never appear in HTTP logs, API responses, `/metrics` or frontend bundles.
   - **Phone GPS and delivery**: admin-authorized enrollment, unique device-to-drone association (409 on conflict), revoke, rejected telemetry, then recovery/re-enrollment; invalid, duplicate, out-of-order, implausible-speed, stale and future telemetry rejection with persisted rejection reasons; per-device 429 rate limit; `OFFLINE` to `PHONE_GPS` to `STALE` transitions; distance accumulation that ignores rejected samples and GPS jumps; geofence arrival evidence; idempotent handover completion with exactly one queued receipt; the phone page exposes permission, last-fix, accuracy, connection and delivery status and embeds no coordinates.
@@ -33,7 +33,7 @@
 - **Live SMTP/Gmail delivery — PENDING.** No Gmail App Password was available. Local test mode and all failure/retry paths were verified with SMTP mocked; a real send was never attempted (automated tests must not send email by design).
 - **Browser automation of login, logout, planning, simulation and replay — PENDING.** The in-app browser-control setup failed before opening the local app, and neither Playwright nor Selenium is installed in the repository; no large new dependency was added. These flows were exercised through the HTTP API and static page checks instead.
 - **Public-domain deployment — PENDING.** Caddy is configured for automatic public certificates and allows the same-origin phone-GPS permission and external map assets, but DNS, firewall ports 80/443, OIDC callback/login and phone GPS must be verified on the actual host/domain. See [the deployment checklist](docs/DOMAIN_DEPLOYMENT.md).
-- **Container/Kubernetes deployment — PENDING.** The GitHub verify job built and scanned the container, but the prior Compose startup and Kubernetes smoke jobs did not complete successfully. Docker is unavailable locally, so the real containers and revised Kubernetes smoke manifest were not run here. The Kubernetes manifest is explicitly single-replica and ephemeral; use the persistent Docker Compose deployment for a domain.
+- **Container/Kubernetes deployment — PENDING.** GitHub's latest completed Kubernetes smoke job passed, but the Compose startup job still failed before the worker-startup ordering fix in `compose.yaml`. Docker is unavailable locally, so the real containers and latest Compose change were not run here. The Kubernetes manifest is explicitly single-replica and ephemeral; use the persistent Docker Compose deployment for a domain.
 
 ## Database and backup status
 

@@ -35,6 +35,20 @@ class ProductionDeploymentConfigTests(unittest.TestCase):
         self.assertIn('fsGroup: 10001', manifest)
         self.assertIn('emptyDir: {}', manifest)
 
+    def test_compose_starts_database_migrator_before_shared_outbox_worker(self):
+        with open(os.path.join(ROOT, 'compose.yaml'), encoding='utf-8') as handle:
+            compose = handle.read()
+
+        self.assertIn(
+            'notification-worker:\n'
+            '    build: .\n'
+            '    command: ["python", "-m", "app.notification_worker"]\n'
+            '    depends_on:\n'
+            '      api:\n'
+            '        condition: service_healthy',
+            compose,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

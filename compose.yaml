@@ -28,6 +28,9 @@ services:
   notification-worker:
     build: .
     command: ["python", "-m", "app.notification_worker"]
+    depends_on:
+      api:
+        condition: service_healthy
     read_only: true
     tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
     cap_drop: [ALL]
