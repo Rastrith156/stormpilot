@@ -51,7 +51,7 @@ jobs:
           export OIDC_CLIENT_SECRET_FILE="$secret_dir/oidc"
           export OAUTH_COOKIE_SECRET_FILE="$secret_dir/cookie"
           docker compose -f compose.yaml -f compose.production.yaml --profile production run --rm --no-deps gateway \
-            validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait --wait-timeout 120
       - run: python scripts/smoke.py
       - name: Validate Prometheus configuration and alert rules
