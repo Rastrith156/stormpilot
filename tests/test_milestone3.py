@@ -156,10 +156,10 @@ class MilestoneThreeTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
-    def test_fleet_reports_four_offline_drones_without_fabricated_positions(self):
+    def test_fleet_reports_five_offline_drones_without_fabricated_positions(self):
         status, fleet = self.request('GET', '/api/fleet')
         self.assertEqual(status, 200)
-        self.assertEqual(len(fleet['drones']), 4)
+        self.assertEqual(len(fleet['drones']), 5)
         self.assertEqual({drone['position_state'] for drone in fleet['drones']}, {'OFFLINE'})
         self.assertTrue(all(drone['position'] is None for drone in fleet['drones']))
         self.assertTrue(all(drone['actual_distance_km'] == 0 for drone in fleet['drones']))

@@ -60,12 +60,12 @@ class FleetTests(unittest.TestCase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
-    def test_fleet_endpoint_exposes_four_demo_drones(self):
+    def test_fleet_endpoint_exposes_five_demo_drones(self):
         status, payload = self.request('GET', '/api/fleet')
         self.assertEqual(status, 200)
-        self.assertEqual(len(payload['drones']), 4)
+        self.assertEqual(len(payload['drones']), 5)
         self.assertEqual({drone['drone_id'] for drone in payload['drones']}, {
-            'SP-DRONE-01', 'SP-DRONE-02', 'SP-DRONE-03', 'SP-DRONE-04'
+            'SP-DRONE-01', 'SP-DRONE-02', 'SP-DRONE-03', 'SP-DRONE-04', 'SP-DRONE-05'
         })
 
     def test_invalid_gps_sample_is_rejected(self):

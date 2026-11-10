@@ -100,7 +100,7 @@ class AdministratorAuthenticationTests(unittest.TestCase):
         self.assertGreaterEqual(row['password_iterations'], 600000)
         conn = store.get_connection()
         try:
-            self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 5)
+            self.assertEqual(conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0], 8)
         finally:
             conn.close()
 

@@ -34,7 +34,7 @@ assert 'adminToken' not in fetch('/drone/connect')
 config = json.loads(fetch('/api/config'))
 assert isinstance(config.get('map_ready'), bool)
 fleet = json.loads(fetch('/api/fleet'))
-assert len(fleet['drones']) == 4
+assert len(fleet['drones']) == 5
 assert all(drone['position_state'] in ('PHONE_GPS', 'STALE', 'OFFLINE', 'SIMULATED') for drone in fleet['drones'])
 traffic = json.loads(fetch('/api/traffic?window_hours=1&cell_size_deg=0.01'))
 assert traffic['window_hours'] == 1 and isinstance(traffic['cells'], list)

@@ -328,6 +328,114 @@ def initialize_storage(force_reset=False):
                 CREATE INDEX IF NOT EXISTS idx_agile_tasks_assignee
                     ON agile_tasks(assignee_id);
                 '''
+            ),
+            (
+                7,
+                '007_invitation_participant_mission_tables',
+                '''
+                CREATE TABLE IF NOT EXISTS invitations (
+                    invitation_id TEXT PRIMARY KEY,
+                    token TEXT NOT NULL UNIQUE,
+                    drone_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    used_by TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(drone_id) REFERENCES drone_registrations(drone_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
+                CREATE INDEX IF NOT EXISTS idx_invitations_drone_id ON invitations(drone_id);
+
+                CREATE TABLE IF NOT EXISTS participants (
+                    participant_id TEXT PRIMARY KEY,
+                    drone_id TEXT NOT NULL UNIQUE,
+                    consent_given_at TEXT,
+                    consent_revoked_at TEXT,
+                    device_info TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(drone_id) REFERENCES drone_registrations(drone_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS location_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    participant_id TEXT NOT NULL,
+                    drone_id TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    stopped_at TEXT,
+                    last_location_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(participant_id) REFERENCES participants(participant_id),
+                    FOREIGN KEY(drone_id) REFERENCES drone_registrations(drone_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_location_sessions_drone ON location_sessions(drone_id);
+                CREATE INDEX IF NOT EXISTS idx_location_sessions_active ON location_sessions(active);
+
+                CREATE TABLE IF NOT EXISTS location_updates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    drone_id TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    accuracy REAL,
+                    device_timestamp TEXT NOT NULL,
+                    server_received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    source TEXT NOT NULL DEFAULT 'PHONE_GPS',
+                    FOREIGN KEY(session_id) REFERENCES location_sessions(session_id),
+                    FOREIGN KEY(drone_id) REFERENCES drone_registrations(drone_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_location_updates_drone_server ON location_updates(drone_id, server_received_at DESC);
+                '''
+            ),
+            (
+                8,
+                '008_mission_and_drone_seeding',
+                '''
+                CREATE TABLE IF NOT EXISTS missions (
+                    mission_id TEXT PRIMARY KEY,
+                    drone_id TEXT NOT NULL,
+                    destination_lat REAL NOT NULL,
+                    destination_lng REAL NOT NULL,
+                    distance_km REAL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'assigned', 'accepted', 'declined', 'in_progress', 'completed', 'cancelled')),
+                    assigned_at TEXT,
+                    accepted_at TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    cancelled_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(drone_id) REFERENCES drone_registrations(drone_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_missions_drone ON missions(drone_id);
+                CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
+
+                CREATE TABLE IF NOT EXISTS mission_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mission_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    FOREIGN KEY(mission_id) REFERENCES missions(mission_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_mission_events_mission ON mission_events(mission_id, created_at);
+
+                INSERT OR IGNORE INTO drone_registrations (drone_id, device_id, source, status, latitude, longitude, gps_accuracy, last_update)
+                VALUES
+                    ('SP-DRONE-01', NULL, 'SIMULATED', 'available', 43.6562, -79.3795, NULL, NULL),
+                    ('SP-DRONE-02', NULL, 'SIMULATED', 'available', 43.6521, -79.3834, NULL, NULL),
+                    ('SP-DRONE-03', NULL, 'SIMULATED', 'available', 43.6474, -79.3915, NULL, NULL),
+                    ('SP-DRONE-04', NULL, 'SIMULATED', 'available', 43.6408, -79.4001, NULL, NULL),
+                    ('SP-DRONE-05', NULL, 'SIMULATED', 'available', 43.6500, -79.3900, NULL, NULL);
+
+                UPDATE drone_registrations
+                SET status = 'available',
+                    source = COALESCE(source, 'SIMULATED')
+                WHERE drone_id IN ('SP-DRONE-01','SP-DRONE-02','SP-DRONE-03','SP-DRONE-04','SP-DRONE-05');
+                '''
             )
         ]
 

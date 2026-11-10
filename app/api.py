@@ -20,13 +20,15 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 try:
     from app import db as store
     from app import optimizer
+    from app import participant_handlers
     from app import security
 except ImportError:  # pragma: no cover
     import db as store
     import optimizer
+    import participant_handlers
     import security
 
-DRONE_COLORS = ('#2dd4bf', '#a78bfa', '#fbbf24', '#4ade80')
+DRONE_COLORS = ('#2dd4bf', '#a78bfa', '#fbbf24', '#4ade80', '#fb7185')
 DEMO_DRONES = [
     {'drone_id': f'SP-DRONE-{number:02d}', 'color': color}
     for number, color in enumerate(DRONE_COLORS, start=1)
@@ -785,6 +787,81 @@ def handle(method, path, body=None, headers=None, query=''):
         if authorization is not None:
             return authorization
         return _handle_device_revoke(body)
+
+    if method == 'POST' and path == '/api/invitations/generate':
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'invitations.generate', method)
+        if authorization is not None:
+            return authorization
+        return participant_handlers._handle_generate_invitations(_read_json(body), user)
+
+    if method == 'GET' and path == '/api/invitations':
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'invitations.list', method)
+        if authorization is not None:
+            return authorization
+        return participant_handlers._handle_list_invitations()
+
+    if method == 'DELETE' and path.startswith('/api/invitations/'):
+        user, authorization = security.authorize(headers, {'ADMIN'}, 'invitations.revoke', method)
+        if authorization is not None:
+            return authorization
+        invitation_id = path.rsplit('/', 1)[-1]
+        if not invitation_id or invitation_id == 'invitations':
+            return 404, {'error': 'Invitation not found.'}
+        return participant_handlers._handle_revoke_invitation(invitation_id, user)
+
+    if method == 'POST' and path.startswith('/api/invitations/') and path.endswith('/enroll'):
+        return _handle_invitation_enroll(_read_json(body), path)
+
+    if method == 'POST' and path == '/api/participant/consent':
+        return participant_handlers._handle_participant_consent(_read_json(body), headers)
+
+    if method == 'POST' and path == '/api/participant/telemetry':
+        return participant_handlers._handle_participant_telemetry(_read_json(body), headers)
+
+    if method == 'GET' and path == '/api/participant/mission':
+        return participant_handlers._handle_participant_mission(headers)
+
+    if method == 'POST' and path.startswith('/api/participant/mission/') and path.endswith('/accept'):
+        return participant_handlers._handle_participant_mission_action(path, 'accept', headers, _read_json(body))
+
+    if method == 'POST' and path.startswith('/api/participant/mission/') and path.endswith('/decline'):
+        return participant_handlers._handle_participant_mission_action(path, 'decline', headers, _read_json(body))
+
+    if method == 'POST' and path.startswith('/api/participant/mission/') and path.endswith('/start'):
+        return participant_handlers._handle_participant_mission_action(path, 'start', headers, _read_json(body))
+
+    if method == 'POST' and path.startswith('/api/participant/mission/') and path.endswith('/complete'):
+        return participant_handlers._handle_participant_mission_action(path, 'complete', headers, _read_json(body))
+
+    if method == 'POST' and path == '/api/missions':
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'missions.create', method)
+        if authorization is not None:
+            return authorization
+        return participant_handlers._handle_create_mission(_read_json(body), user)
+
+    if method == 'GET' and path == '/api/missions':
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'missions.list', method)
+        if authorization is not None:
+            return authorization
+        return participant_handlers._handle_list_missions()
+
+    if method == 'GET' and path.startswith('/api/missions/'):
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR', 'VIEWER'}, 'missions.read', method)
+        if authorization is not None:
+            return authorization
+        mission_id = path.rsplit('/', 1)[-1]
+        if not mission_id or mission_id == 'missions':
+            return 404, {'error': 'Mission not found.'}
+        return participant_handlers._handle_get_mission(mission_id)
+
+    if method == 'POST' and path.startswith('/api/missions/') and path.endswith('/cancel'):
+        user, authorization = security.authorize(headers, {'ADMIN', 'OPERATOR'}, 'missions.cancel', method)
+        if authorization is not None:
+            return authorization
+        mission_id = path.split('/')[-2]
+        if not mission_id or mission_id == 'missions':
+            return 404, {'error': 'Mission not found.'}
+        return participant_handlers._handle_cancel_mission(mission_id, user)
 
     if method == 'POST' and path == '/api/device/telemetry':
         return _handle_telemetry(body, headers=headers)
@@ -1847,6 +1924,12 @@ def _fleet_payload():
                 {'latitude': point['latitude'], 'longitude': point['longitude']}
                 for point in path_rows
             ]
+            participant_row = conn.execute(
+                'SELECT consent_given_at FROM participants WHERE drone_id = ?',
+                (identity['drone_id'],),
+            ).fetchone()
+            consent_given_at = participant_row['consent_given_at'] if participant_row else None
+
             drones.append({
                 **identity,
                 'position': position,
@@ -1857,6 +1940,8 @@ def _fleet_payload():
                 'accuracy_m': accuracy,
                 'last_update': last_update,
                 'last_received_at': latest['server_received_at'] if latest is not None else None,
+                'consent_given_at': consent_given_at,
+                'consented': consent_given_at is not None,
                 'mission': mission['delivery_id'] if mission else None,
                 'delivery_id': mission['delivery_id'] if mission else None,
                 'delivery_status': mission['status'] if mission else None,
@@ -2432,6 +2517,19 @@ def _handle_telemetry(body, headers=None):
     if not device or device['drone_id'] != drone_id:
         return 401, {'error': 'Device is not authorized for this drone.'}
 
+    conn = store.get_connection()
+    try:
+        participant_row = conn.execute(
+            'SELECT consent_given_at FROM participants WHERE drone_id = ?',
+            (drone_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    # Only enforce consent when a participant record exists and has explicitly not consented.
+    # Devices without a participant record (legacy/simulated) can still submit telemetry.
+    if participant_row is not None and participant_row['consent_given_at'] is None:
+        return 403, {'error': 'Participant has not given GPS consent. Consent is required before telemetry can be submitted.'}
+
     if _is_rate_limited(device_id):
         return 429, {'error': 'Telemetry rate limit exceeded. Please wait a moment and retry.'}
 
@@ -2585,6 +2683,126 @@ def _handle_telemetry(body, headers=None):
         return 500, {'error': 'Telemetry storage is temporarily unavailable.'}
     finally:
         conn.close()
+
+
+def _handle_invitation_enroll(data, path):
+    """Enroll a device using an invitation token (no admin session required)."""
+    if not isinstance(data, dict):
+        return 400, {'error': 'Invalid enrollment payload.'}
+
+    # Extract invitation token from path: /api/invitations/{token}/enroll
+    parts = path.rstrip('/').split('/')
+    if len(parts) < 4 or parts[-1] != 'enroll':
+        return 404, {'error': 'Invitation not found.'}
+    invitation_token = parts[-2]
+    if not invitation_token:
+        return 404, {'error': 'Invitation not found.'}
+
+    device_id = str(data.get('device_id', '')).strip()
+    if not device_id:
+        return 400, {'error': 'Device ID is required.'}
+
+    conn = store.get_connection()
+    try:
+        invitation = conn.execute(
+            '''
+            SELECT i.invitation_id, i.token, i.drone_id, i.expires_at, i.revoked,
+                   p.participant_id, p.consent_given_at
+            FROM invitations i
+            LEFT JOIN participants p ON p.drone_id = i.drone_id
+            WHERE i.token = ?
+            ''',
+            (invitation_token,),
+        ).fetchone()
+
+        if invitation is None:
+            return 404, {'error': 'Invitation not found.'}
+        if invitation['revoked']:
+            return 403, {'error': 'Invitation has been revoked.'}
+
+        expires = _parse_timestamp(invitation['expires_at'])
+        if expires is None:
+            return 403, {'error': 'Invitation has an invalid expiry.'}
+        now = datetime.now(timezone.utc)
+        if now > expires:
+            return 403, {'error': 'Invitation has expired.'}
+
+        drone_id = invitation['drone_id']
+        valid_ids = {drone['drone_id'] for drone in DEMO_DRONES}
+        if drone_id not in valid_ids:
+            return 400, {'error': 'Unsupported drone ID for this invitation.'}
+
+        # Check if device already enrolled for a different drone
+        existing_credential = conn.execute(
+            'SELECT drone_id, status FROM device_credentials WHERE device_id = ?',
+            (device_id,),
+        ).fetchone()
+        if existing_credential and existing_credential['status'] == 'ACTIVE' and existing_credential['drone_id'] != drone_id:
+            return 409, {
+                'error': 'Device is already assigned to another drone. Revoke it before re-enrollment.',
+                'device_id': device_id,
+            }
+
+        # Ensure participant record exists and mark consent as given via enrollment
+        participant_id = invitation['participant_id']
+        if participant_id is None:
+            conn.execute(
+                'INSERT OR IGNORE INTO participants (participant_id, drone_id, consent_given_at, consent_revoked_at, device_info, created_at, updated_at) '
+                'VALUES (?, ?, ?, NULL, ?, ?, ?)',
+                ('participant-' + secrets.token_urlsafe(12), drone_id, _utc_now(), 'invitation-enroll', _utc_now(), _utc_now()),
+            )
+        else:
+            conn.execute(
+                'UPDATE participants SET consent_given_at = COALESCE(consent_given_at, ?), device_info = COALESCE(device_info, ?), updated_at = ? WHERE drone_id = ?',
+                (_utc_now(), 'invitation-enroll', _utc_now(), drone_id),
+            )
+
+        secret = secrets.token_urlsafe(32)
+        salt = secrets.token_hex(16)
+        digest = _hash_secret(secret, salt)
+        now_utc = _utc_now()
+        expires_at = _utc_now_plus_days(30)
+        with conn:
+            conn.execute(
+                '''
+                INSERT INTO device_credentials (device_id, drone_id, secret_hash, secret_salt, status, created_at, updated_at, expires_at)
+                VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    drone_id = excluded.drone_id,
+                    secret_hash = excluded.secret_hash,
+                    secret_salt = excluded.secret_salt,
+                    status = 'ACTIVE',
+                    updated_at = excluded.updated_at,
+                    expires_at = excluded.expires_at,
+                    revoked_reason = NULL
+                ''',
+                (device_id, drone_id, digest, salt, now_utc, now_utc, expires_at),
+            )
+            conn.execute(
+                '''
+                INSERT INTO device_registrations (device_id, drone_id, status, source, created_at, updated_at, last_seen, expires_at)
+                VALUES (?, ?, 'active', 'PHONE_GPS', ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    drone_id = excluded.drone_id,
+                    status = 'active',
+                    source = excluded.source,
+                    updated_at = excluded.updated_at,
+                    last_seen = excluded.last_seen,
+                    expires_at = excluded.expires_at,
+                    revocation_reason = NULL
+                ''',
+                (device_id, drone_id, now_utc, now_utc, now_utc, expires_at),
+            )
+
+        store.record_event('DEVICE_ENROLLED_VIA_INVITATION', 'DEVICE', device_id, {
+            'drone_id': drone_id,
+            'invitation_id': invitation['invitation_id'],
+            'actor': 'participant',
+        })
+    finally:
+        conn.close()
+
+    return 200, {'device_id': device_id, 'drone_id': drone_id, 'token': secret, 'status': 'active'}
 
 
 def _handle_device_register(body):
